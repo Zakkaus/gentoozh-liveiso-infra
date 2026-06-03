@@ -1,0 +1,13 @@
+[Unit]
+Description=每周触发一次 Live ISO 自动构建
+
+[Timer]
+# 每周一 凌晨 4:00（UTC+8 / 北京时间）触发。有 binpkg+distfiles 缓存后增量
+# 构建很快，故改为周更。机器走 UTC，systemd 按时区换算（UTC+8 04:00 = UTC 20:00）。
+OnCalendar=Mon *-*-* 04:00:00 Asia/Shanghai
+# 错过（关机等）则开机后补跑
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

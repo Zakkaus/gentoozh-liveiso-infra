@@ -1,0 +1,5 @@
+# 含密钥(IP/SSH key/Telegram token),绝不入库
+config.env
+notify.conf
+build/config.env
+build/notify.conf

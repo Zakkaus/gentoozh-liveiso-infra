@@ -1,0 +1,23 @@
+[Unit]
+Description=Gentoo 中文社区 Live ISO 自动构建并部署到下载站
+After=network-online.target
+Wants=network-online.target
+# 任意原因 failed(含 ExecStartPre 语法体检不过 / wrapper 极早期退出)→ 拉起通知 service,
+# 补上 wrapper 自身 on_exit 够不着的盲区(那时 wrapper 还没运行/通知函数还没就绪)。
+OnFailure=live-iso-notify-fail.service
+
+[Service]
+Type=oneshot
+# 启动几小时构建【之前】对 wrapper 及运行期会调用的脚本做 bash -n 语法体检(ms 级,零执行)。
+# 任一语法错 → service 直接 failed、永不进入构建——根治"崩在 stage 前的静默白跑"那类根因。
+# 只检构建机本地三脚本(render/cleanup 在镜像站,路径不在本机,不能列入否则误失败)。
+ExecStartPre=/bin/bash -n /opt/live-iso-builder/build-and-deploy.sh
+ExecStartPre=/bin/bash -n /opt/live-iso-builder/verify-iso.sh
+ExecStartPre=/bin/bash -n /opt/live-iso-builder/reupload-iso.sh
+ExecStart=/opt/live-iso-builder/build-and-deploy.sh
+# 超时要同时覆盖：CPU 预检最坏延后（12×30min=6h）+ 全量构建（~3-4h）。
+# 故设 12h，避免延后阶段就耗尽超时把构建杀掉。
+TimeoutStartSec=43200
+# 内存吃紧时不要被 OOM-killer 优先干掉系统其它进程
+OOMScoreAdjust=200
+Nice=5
