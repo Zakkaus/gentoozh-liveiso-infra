@@ -506,6 +506,12 @@ s = s.replace(f1_old, 'crun emerge -c || true', 1)
 f2_old = 'crun eclean-kernel --no-bootloader-update --no-mount -n 1 || exit 1'
 assert f2_old in s, "未找到 eclean-kernel 行"
 s = s.replace(f2_old, 'crun eclean-kernel --no-bootloader-update --no-mount -n 1 || true', 1)
+# eclean-pkg 在 chroot 里永远 not found(chroot 无 gentoolkit),是无害噪音(|| true 兜着)
+# 但它想做的"清持久 binpkg 缓存旧版本"也从没真做。直接替成 no-op 去掉噪音;持久缓存
+# (宿主 SSD,当前 257G 余量充足)清理交宿主侧按需,不为它往 ISO 塞 gentoolkit。
+f3_old = 'crun eclean-pkg || true'
+assert f3_old in s, "未找到 eclean-pkg 行"
+s = s.replace(f3_old, ': # [autobuild] 已移除 chroot eclean-pkg(无 gentoolkit 必 not found 噪音;缓存清理交宿主)', 1)
 
 open(path, "w", encoding="utf-8").write(s)
 print("OK")
