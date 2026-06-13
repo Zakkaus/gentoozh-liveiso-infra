@@ -128,12 +128,13 @@ preflight_mirror() {
     { [ -n "${avail_kb}" ] && [ "${avail_kb}" -gt 0 ] 2>/dev/null; } || { log "[错误] 取镜像站 df 失败或返回非数字(avail_kb=[${avail_kb:-空}])"; return 1; }
     [ "${biggest_b:-0}" -gt 0 ] 2>/dev/null || biggest_b=$((6*1024*1024*1024))
     [ "${cnt_now:-0}" -ge 0 ] 2>/dev/null || cnt_now=0
-    # 上线峰值 = 现有 ISO 数 + 1 个新盘(清理到 KEEP 在上线后才跑)。按【实际现有数+1】估,不是
-    # 死按 KEEP+1——否则空盘时(现有 0)也要求 KEEP+1 份的量,会在小盘(20G)上误拒可成功的构建。
-    local mult=$(( cnt_now + 1 ))
-    local need_kb=$(( (biggest_b/1024) * mult ))
-    log "  镜像站可用 $((avail_kb/1024/1024))G,需 ≥ $((need_kb/1024/1024))G(现有 ${cnt_now} 份+1 新盘,单盘约 $((biggest_b/1024/1024/1024))G)"
-    [ "${avail_kb}" -ge "${need_kb}" ] || { log "[错误] 镜像站盘余量不足:有 $((avail_kb/1024/1024))G < 需 $((need_kb/1024/1024))G(现有 ${cnt_now}+1 份)"; return 1; }
+    # 现有 cnt 份已在盘上(算 used、不算 free);新盘落地只多吃【1 份】的空闲,清理到 KEEP 在
+    # 上线成功后才跑。故只需空闲 ≥ 1 份 + 2G 安全余量——别拿 (cnt+1)×单盘 去比【空闲】(那会把
+    # 已在盘上的旧盘又算一遍,在小盘 20G 上随 ISO 累积而误拒本可成功的构建)。
+    local reserve_kb=$(( 2*1024*1024 ))
+    local need_kb=$(( biggest_b/1024 + reserve_kb ))
+    log "  镜像站可用 $((avail_kb/1024/1024))G,需 ≥ $((need_kb/1024/1024))G(1 新盘约 $((biggest_b/1024/1024/1024))G + 2G 余量;现有 ${cnt_now} 份已占用不计)"
+    [ "${avail_kb}" -ge "${need_kb}" ] || { log "[错误] 镜像站盘余量不足:有 $((avail_kb/1024/1024))G < 需 $((need_kb/1024/1024))G(放不下 1 新盘+2G 余量)"; return 1; }
     return 0
 }
 # git 仓库可达性探测,3 次退避重试(瞬时 TLS/DNS/5xx 抖动不该毙整锅;与 build.sh clone overlay 同口径)
@@ -703,6 +704,36 @@ retry ${SSH} "${M_USER}@${M_HOST}" "SKIP_SHA_SELFCHECK=1 /usr/local/bin/render-i
 verify_published "${ISO_NAME}" "${SHA}" || fail "端到端核对失败:镜像站对外服务的不是本锅 ${ISO_NAME}(已上传但站上不一致)"
 log "下载站当前空间与列表:"
 ${SSH} "${M_USER}@${M_HOST}" "df -h /srv | tail -1; ls -lh '${M_ISODIR}'/gig-os-*.iso 2>/dev/null" >>"${LOG}" 2>&1
+
+# ── 6b. 上传到 Cloudflare R2（零出口流量；保留 R2_KEEP 份；失败仅告警，站上已上线不影响本锅成功）──
+#   从 SSD 暂存（STAGE）取已验证 ISO 上传；R2_* 缺任一或无 rclone 则跳过。
+if [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ENDPOINT:-}" ] && command -v rclone >/dev/null 2>&1; then
+    R2_KEEP="${R2_KEEP:-3}"; R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://r2.gentoozh.org}"
+    export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare RCLONE_CONFIG_R2_REGION=auto
+    export RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT}"
+    log "R2：上传 ${ISO_NAME}（+校验）到 bucket ${R2_BUCKET}…"
+    if rclone copyto "${STAGE}/${ISO_NAME}" "R2:${R2_BUCKET}/${ISO_NAME}" --s3-no-check-bucket --s3-chunk-size 64M --retries 5 2>>"${LOG}"; then
+        for e in sha256 md5; do [ -f "${STAGE}/${ISO_NAME}.${e}" ] && rclone copyto "${STAGE}/${ISO_NAME}.${e}" "R2:${R2_BUCKET}/${ISO_NAME}.${e}" --s3-no-check-bucket --retries 5 2>>"${LOG}"; done
+        # 对外核对：R2 远端大小 + 公开域名 content-length 都等于本地
+        r2_remote=$(rclone size "R2:${R2_BUCKET}/${ISO_NAME}" --json 2>>"${LOG}" | grep -oE '"bytes":[0-9]+' | grep -oE '[0-9]+')
+        loc_size=$(stat -c%s "${STAGE}/${ISO_NAME}" 2>/dev/null)
+        pub_len=$(curl -fsSLI "${R2_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
+        if [ -n "${loc_size:-}" ] && [ "${r2_remote:-0}" = "${loc_size}" ] && [ "${pub_len:-0}" = "${loc_size}" ]; then
+            log "[OK] R2 上线并通过对外核对：${R2_PUBLIC_BASE}/${ISO_NAME}（${loc_size} bytes）"
+            mapfile -t _r2 < <(rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
+            _i=0; for f in "${_r2[@]}"; do _i=$((_i+1)); [ "${_i}" -le "${R2_KEEP}" ] && continue; [ "${f}" = "${ISO_NAME}" ] && continue
+                log "R2 删旧：${f}（含 .sha256/.md5）"; rclone deletefile "R2:${R2_BUCKET}/${f}" 2>>"${LOG}" || true
+                rclone deletefile "R2:${R2_BUCKET}/${f}.sha256" 2>>"${LOG}" || true; rclone deletefile "R2:${R2_BUCKET}/${f}.md5" 2>>"${LOG}" || true
+            done
+        else
+            log "[警告] R2 对外核对不一致（remote=${r2_remote:-空} pub=${pub_len:-空} local=${loc_size:-空}）"; notify WARN "R2 已传但对外核对不一致：${ISO_NAME}"
+        fi
+    else
+        log "[警告] R2 上传失败（站上已上线，不影响本锅成功）"; notify WARN "R2 上传失败：${ISO_NAME}（站上已上线）"
+    fi
+else
+    log "R2 未配置或无 rclone，跳过 R2 上传（仅发布到镜像站）"
+fi
 
 # ── 7. 收尾（tmpfs 整块释放，零 SSD 残留）────────────────────
 # OK 文案据 PUBLISHED_VERIFIED 如实写:ok=已通过对外核对;skip=M_URLBASE 未配、未做核对(别谎称已核对)
