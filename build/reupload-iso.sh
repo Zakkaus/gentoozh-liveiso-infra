@@ -1,16 +1,22 @@
 #!/bin/bash
-# 从 /opt/live-iso-builder/last-iso/ 重传【已验证】ISO 到下载站(不重编)。
+# 从 /opt/live-iso-builder/last-iso/ 把【已验证】ISO 重传到 Cloudflare R2(不重编)。
+# 用途:自动构建里 R2 上传那步失败(token 抖动/网络/CF 故障)时,ISO 已编好+验过+暂存,
+# R2 恢复后跑本脚本重传即可,不必再烧几小时重编。
 #
 # 以 last-iso/BUILD_MANIFEST 为唯一权威身份(构建脚本 stage 成功时原子写入):
 #   无 manifest / 实盘 sha 与 manifest 不符 / RUN_STAMP 陈旧  → 拒绝盲传。
 # 这是事故直接修复:旧版盲取 last-iso 里"最新一盘"就推,曾把崩在 stage 前残留的旧坏盘
 # (early-KMS 炸显卡 / 无 calamares-r8 / 装机清理为空=后门)推上站还发了通知。
 #
-# 注意:下载站 root shell 是 zsh,rm -f dir/* 空目录会 nomatch 报错 → 用 rm -rf+mkdir。
+# 任何异常都会推 Telegram(与构建脚本同一 TG_TOKEN/TG_CHAT)。
 set -uo pipefail
 STAGE=/opt/live-iso-builder/last-iso
 LOCK=/run/live-iso-build.lock
 . /opt/live-iso-builder/config.env || { echo "missing config.env"; exit 1; }
+
+R2_KEEP="${R2_KEEP:-3}"
+R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://r2.gentoozh.org}"
+MIRROR_URL="${MIRROR_URL:-https://mirror.gentoozh.org/}"
 
 notify(){ [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_CHAT:-}" ] || return 0
   curl -fsS -m 20 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
@@ -22,12 +28,16 @@ on_exit(){ local rc=$?; [ "$DONE" = 1 ] && return 0; [ "$NOTIFIED" = 1 ] && retu
 trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 trap on_exit EXIT
 
-# 防并发:与自动构建共用同一把锁(构建在跑就别同时重传,避免互删 .incoming / 并发 render)
+# 防并发:与自动构建共用同一把锁(构建在跑就别同时重传,避免互删 R2 旧盘 / 并发上传)
 exec 9>"$LOCK"
 flock -n 9 || { echo "[错误] 已有构建/重传在跑($LOCK 被占),退出"; DONE=1; exit 0; }
 
-SSH="ssh -p $M_PORT -i $M_KEY -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=20"
-SCP="scp -P $M_PORT -i $M_KEY -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+# ── R2 配置闸:缺 R2_* 直接拒绝(R2 是唯一发布目标)──────────────
+[ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ENDPOINT:-}" ] \
+  || { echo "[错误] config.env 缺 R2_*(R2 是唯一发布目标)"; notify FAILED "拒绝重传:config.env 缺 R2_*"; NOTIFIED=1; exit 1; }
+command -v rclone >/dev/null 2>&1 || { echo "[错误] 缺 rclone"; notify FAILED "拒绝重传:构建机缺 rclone"; NOTIFIED=1; exit 1; }
+export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare RCLONE_CONFIG_R2_REGION=auto
+export RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT}"
 
 # ── 以 BUILD_MANIFEST 为权威,三道闸 ──────────────────────────
 MANIFEST="$STAGE/BUILD_MANIFEST"
@@ -51,44 +61,45 @@ if [ "$ST_EPOCH" != 0 ]; then
     notify WARN "重传被陈旧闸拦下:$NAME stamp=$STAMP(${AGE_DAYS}天),需 --force"; NOTIFIED=1; exit 1
   fi
 fi
-echo "[OK] manifest 三道闸通过,准备重传 $NAME"
+echo "[OK] manifest 三道闸通过,准备重传 $NAME 到 R2"
 
-# ── 上传(不做破坏性预清理;清理放到上线成功后)────────────────
-$SSH "$M_USER@$M_HOST" "rm -rf '$M_ISODIR/.incoming'; mkdir -p '$M_ISODIR/.incoming'" || { echo 建incoming失败; notify FAILED "重传:建 .incoming 失败"; NOTIFIED=1; exit 1; }
-echo "scp $(du -h "$STAGE/$NAME"|cut -f1) 中(HK→US,几分钟)…"
-$SCP "$STAGE/$NAME" "$STAGE/$NAME.md5" "$STAGE/$NAME.sha256" "$M_USER@$M_HOST:$M_ISODIR/.incoming/" || { echo scp失败; notify FAILED "重传:scp 失败"; NOTIFIED=1; exit 1; }
-$SSH "$M_USER@$M_HOST" "bash -s" <<R
-set -e
-cd '$M_ISODIR/.incoming'
-echo '$SHA  $NAME' | sha256sum -c -
-chmod 644 '$NAME' '$NAME.md5' '$NAME.sha256'
-mv -f '$NAME.sha256' '$NAME.md5' '$M_ISODIR/'
-mv -f '$NAME' '$M_ISODIR/'
-cd '$M_ISODIR'
-echo '$SHA  $NAME' | sha256sum -c -
-echo "OK 已上线且 live 回读一致 $NAME"
-R
-[ $? -eq 0 ] || { echo "[错误] 远端上线/回读失败"; notify FAILED "重传:远端上线/回读失败 $NAME"; NOTIFIED=1; exit 1; }
+# ── 上传到 R2(零出口流量,唯一发布目标)────────────────────────
+echo "rclone copy $(du -h "$STAGE/$NAME"|cut -f1) → R2:${R2_BUCKET}/${NAME} …"
+if ! rclone copyto "$STAGE/$NAME" "R2:${R2_BUCKET}/${NAME}" --s3-no-check-bucket --s3-chunk-size 64M --retries 5; then
+  echo "[错误] R2 上传失败"; notify FAILED "重传:R2 上传失败 $NAME(稍后再试)"; NOTIFIED=1; exit 1
+fi
+for e in sha256 md5; do [ -f "$STAGE/$NAME.$e" ] && rclone copyto "$STAGE/$NAME.$e" "R2:${R2_BUCKET}/${NAME}.$e" --s3-no-check-bucket --retries 5 || true; done
 
-# ── 上线成功后才清理 + 渲染(本盘永不删)────────────────────────
-$SSH "$M_USER@$M_HOST" "ISO_DIR='$M_ISODIR' KEEP=$KEEP KEEPNAME='$NAME' /usr/local/bin/cleanup-old-iso.sh; SKIP_SHA_SELFCHECK=1 /usr/local/bin/render-index.sh" || echo "清理/渲染告警"
+# ── 端到端核对 1:R2 公开域名实际服务的就是这盘(content-length == 本地大小)──
+LOC_SIZE=$(stat -c%s "$STAGE/$NAME" 2>/dev/null)
+PUB_LEN=$(curl -fsSL -H 'Cache-Control: no-cache' -I "${R2_PUBLIC_BASE}/${NAME}" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
+if [ -z "${LOC_SIZE:-}" ] || [ "${PUB_LEN:-0}" != "${LOC_SIZE}" ]; then
+  echo "[错误] R2 对外核对失败:${R2_PUBLIC_BASE}/${NAME} content-length=${PUB_LEN:-空} != 本地 ${LOC_SIZE:-空}"
+  notify FAILED "重传后对外核对失败:${R2_PUBLIC_BASE}/${NAME} 大小不一致"; NOTIFIED=1; exit 1
+fi
+echo "[OK] R2 已发布且对外核对一致:${R2_PUBLIC_BASE}/${NAME}(${LOC_SIZE} bytes)"
 
-# ── 端到端核对:站上对外【实际服务】的就是这盘 ──────────────────
-if [ -n "${M_URLBASE:-}" ]; then
-  RSHA=$(curl -fsS -m 30 -H 'Cache-Control: no-cache' "${M_URLBASE}/${NAME}.sha256" 2>/dev/null | awk '{print $1}')
-  PAGE=$(curl -fsS -m 30 -H 'Cache-Control: no-cache' "${M_PAGEURL:-${M_URLBASE%/*}/}" 2>/dev/null)
-  if [ "$RSHA" = "$SHA" ] && printf '%s' "$PAGE" | grep -qF "$NAME" && printf '%s' "$PAGE" | grep -qiF "$SHA"; then
-    echo "[OK] 对外核对:站上=本盘 $NAME"
-    notify OK "重传成功并通过对外核对:$NAME(sha ${SHA:0:12}…)"
-  else
-    echo "[错误] 对外核对失败:站上 sha=${RSHA:-空} 期望=$SHA(可能渲染了旧盘)"
-    notify FAILED "重传后对外核对失败:站上不是 $NAME"; NOTIFIED=1; exit 1
-  fi
+# ── 端到端核对 2:mirror 落地页(Worker 即时读 R2)已列出本盘 ──
+MIRROR_OK=0
+for i in 1 2 3 4 5 6; do
+  if curl -fsSL -H 'Cache-Control: no-cache' "${MIRROR_URL}?_=reup-${i}" 2>/dev/null | grep -qF "${NAME}"; then MIRROR_OK=1; break; fi
+  echo "  mirror 落地页暂未反映 ${NAME},20s 后重试(${i}/6)…"; sleep 20
+done
+if [ "$MIRROR_OK" = 1 ]; then
+  echo "[OK] mirror 落地页已反映:${MIRROR_URL}(${NAME})"
 else
-  echo "[警告] 未配 M_URLBASE,跳过对外核对(强烈建议配上)"
-  notify WARN "重传完成但未做对外核对(M_URLBASE 未配):$NAME"
+  echo "[警告] mirror 落地页 ~2 分钟内未反映 ${NAME}(R2 已上线;Worker 边缘缓存延迟?)"
+  notify WARN "重传:R2 已上线但 mirror 落地页未及时反映 ${NAME}(稍后手动看 ${MIRROR_URL})"
 fi
 
-DONE=1   # 上线+核对都过=真成功;放在收尾展示之前,免得展示用的 ls 瞬时抖动/nomatch 误触发 on_exit 的 FAILED
-echo "=== 完成,下载站现有 ==="
-$SSH "$M_USER@$M_HOST" "ls -lh '$M_ISODIR'/gig-os-*.iso" 2>/dev/null || true
+# ── 保留最近 R2_KEEP 份(gig-os-YYYYMMDD.iso),删更旧的;本盘永不删 ──
+mapfile -t _r2 < <(rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
+_i=0; for f in "${_r2[@]}"; do _i=$((_i+1)); [ "$_i" -le "$R2_KEEP" ] && continue; [ "$f" = "$NAME" ] && continue
+  echo "R2 删旧:$f(含 .sha256/.md5)"; rclone deletefile "R2:${R2_BUCKET}/${f}" || true
+  rclone deletefile "R2:${R2_BUCKET}/${f}.sha256" 2>/dev/null || true; rclone deletefile "R2:${R2_BUCKET}/${f}.md5" 2>/dev/null || true
+done
+
+DONE=1   # R2 上线 + 对外核对都过 = 真成功;放在收尾展示之前,免得展示用的 ls 瞬时抖动误触发 on_exit
+notify OK "重传成功并通过对外核对:$NAME(sha ${SHA:0:12}…)R2 + mirror.gentoozh.org"
+echo "=== 完成,R2 现有 ==="
+rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r || true

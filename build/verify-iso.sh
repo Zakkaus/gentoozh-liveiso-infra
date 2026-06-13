@@ -191,16 +191,16 @@ CFG="${CONFIG_ENV:-/opt/live-iso-builder/config.env}"
 # shellcheck disable=SC1090
 [ -f "${CFG}" ] && . "${CFG}" 2>/dev/null
 SCAN_DIRS="${R}/etc ${R}/root ${R}/home ${R}/usr/local ${R}/opt"
-for pat in "${TG_TOKEN:-}" "${M_HOST:-}"; do
+for pat in "${TG_TOKEN:-}" "${R2_ACCESS_KEY_ID:-}" "${R2_SECRET_ACCESS_KEY:-}"; do
   [ -n "${pat}" ] || continue
   hit="$(grep -rlIF "${pat}" ${SCAN_DIRS} 2>/dev/null | head -3)"
-  [ -n "${hit}" ] && { bad "ISO 内含敏感串(config.env 的 token/镜像主机)于:${hit}"; LEAK=1; }
+  [ -n "${hit}" ] && { bad "ISO 内含敏感串(config.env 的 Telegram/R2 凭据)于:${hit}"; LEAK=1; }
 done
 find "${R}/etc" "${R}/root" "${R}/home" "${R}/opt" -name 'config.env' 2>/dev/null | grep -q . && { bad "ISO 内含 config.env(运维密钥全集)"; LEAK=1; }
 if grep -rlE 'BEGIN (OPENSSH|RSA|EC|DSA)? ?PRIVATE KEY' "${R}/root/.ssh" "${R}/etc/skel" "${R}/home" 2>/dev/null | grep -q .; then
   bad "ISO 内含 SSH/PEM 私钥(构建机/运维凭据泄漏)"; LEAK=1
 fi
-[ "${LEAK}" = 0 ] && ok "ISO 内未发现 token/镜像主机/config.env/私钥"
+[ "${LEAK}" = 0 ] && ok "ISO 内未发现 Telegram/R2 凭据/config.env/私钥"
 
 echo
 echo "===== 验证结果:通过 ${PASS} / 警告 ${WARN} / 关键失败 ${CRIT} ====="
