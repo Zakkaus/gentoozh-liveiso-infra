@@ -1,8 +1,8 @@
 #!/bin/bash
 # Gentoo 中文社区 Live ISO —— 自动构建 + 部署
 #
-# 在 tmpfs 里全内存构建（省 SSD），用满 CPU，完成后把 ISO 上传到下载站
-# mirror.gentoozh.org，并在下载站保留最近 KEEP 个版本、删除更旧的。
+# 在 tmpfs 里全内存构建（省 SSD），用满 CPU，完成后把 ISO 上传到 Cloudflare R2
+# （r2.gentoozh.org），保留最近 R2_KEEP 个版本；落地页 mirror.gentoozh.org 由 Worker 即时读 R2。
 #
 # 由 systemd timer 每两周触发一次；需 root 运行（build.sh 要求 root）。
 
@@ -183,9 +183,25 @@ preflight_ram() {
     [ "${avail_g}" -ge "${need_g}" ] || { log "[错误] 可用内存不足:有 ${avail_g}G < 需 ${need_g}G(按真实工作集估)"; return 1; }
     return 0
 }
+preflight_r2() {
+    log "预检:R2 配置 + 可达(唯一发布目标)…"
+    [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ENDPOINT:-}" ] \
+        || { log "[错误] config.env 缺 R2_*(R2 是唯一发布目标)"; return 1; }
+    command -v rclone >/dev/null 2>&1 || { log "[错误] 构建机缺 rclone(emerge net-misc/rclone 或放 static 二进制)"; return 1; }
+    export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare RCLONE_CONFIG_R2_REGION=auto
+    export RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT}"
+    local n=0
+    until rclone lsf "R2:${R2_BUCKET}/" >/dev/null 2>&1; do
+        n=$((n+1)); [ "${n}" -ge 3 ] && { log "[错误] R2 bucket ${R2_BUCKET} 连续 3 次列取失败(token/网络?)"; return 1; }
+        log "  R2 第 ${n} 次列桶失败,10s 后重试…"; sleep 10
+    done
+    log "  [OK] R2 可达:bucket ${R2_BUCKET}"
+    return 0
+}
+
 preflight() {
     log "===== 预检(编译前,失败即 abort,不烧几小时)====="
-    preflight_mirror   || fail "预检失败:镜像站不可达/盘余量不足"
+    preflight_r2       || fail "预检失败:R2 未配置/不可达"
     preflight_overlays || fail "预检失败:calamares overlay / settings-gig fork 缺失"
     preflight_ram      || fail "预检失败:可用内存不足以挂 ${TMPFS_SIZE} tmpfs"
     log "[OK] 预检全过,进入构建"
@@ -659,81 +675,52 @@ MANI
 mv -f "${STAGE}/BUILD_MANIFEST.tmp" "${STAGE}/BUILD_MANIFEST" || fail "写 BUILD_MANIFEST 失败"
 log "[OK] 验证通过的 ISO 已暂存 + 写 BUILD_MANIFEST:stamp=${STAMP} sha=${SHA:0:12}… iso=${ISO_NAME}(上传失败也不会丢)"
 
-# 瞬时网络抖动重试(最多4次,退避 10/20/30s);输出进日志
-retry() { local n=1; while true; do "$@" >>"${LOG}" 2>&1 && return 0; [ "$n" -ge 4 ] && return 1; log "  …第${n}次失败,$((n*10))s 后重试"; sleep $((n*10)); n=$((n+1)); done; }
+# ── 6. 发布到 Cloudflare R2(零出口流量,唯一发布目标)+ 端到端核对 ─────────────
+#   从 SSD 暂存(STAGE)取已验证 ISO 上传 R2 → 校验 R2 公开域名服务的就是本锅 →
+#   确认 mirror.gentoozh.org(Worker 即时读 R2)已反映新镜像 → 保留最近 R2_KEEP 份。
+#   R2 是唯一目标:上传失败 = 整锅失败(ISO 已暂存,reupload-iso.sh 可重传不必重编)。
+R2_KEEP="${R2_KEEP:-3}"; R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://r2.gentoozh.org}"
+MIRROR_URL="${MIRROR_URL:-https://mirror.gentoozh.org/}"
+export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare RCLONE_CONFIG_R2_REGION=auto
+export RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT}"
 
-# ── 6. 上传到下载站(从 SSD 暂存;每步重试抗抖动;失败保留 ISO)──────
-# 不在上传【前】做破坏性清理:旧版 KEEP-1 预清理会在新盘落地前先删一份归档,若随后上传失败
-# → 站上更少盘、可能只剩旧坏盘(正是事故土壤)。预检已确保盘够 KEEP+1;清理一律放到上线成功之后。
-UPLOAD_OK=0
-log "上传 ${ISO_NAME} 到 .incoming(瞬时抖动自动重试)…"
-if retry ${SSH} "${M_USER}@${M_HOST}" "rm -rf '${M_ISODIR}/.incoming'; mkdir -p '${M_ISODIR}/.incoming'" \
-   && retry ${SCP} "${STAGE}/${ISO_NAME}" "${STAGE}/${ISO_NAME}.md5" "${STAGE}/${ISO_NAME}.sha256" "${M_USER}@${M_HOST}:${M_ISODIR}/.incoming/"; then
-    log "下载站校验 sha256 → 原子上线(校验文件先 mv、ISO 最后 mv)→ 上线后回读…"
-    ${SSH} "${M_USER}@${M_HOST}" "bash -s" >>"${LOG}" 2>&1 <<REMOTE
-set -e
-cd '${M_ISODIR}/.incoming'
-echo '${SHA}  ${ISO_NAME}' | sha256sum -c - || { echo '[错误] .incoming sha256 校验失败'; exit 1; }
-chmod 644 '${ISO_NAME}' '${ISO_NAME}.md5' '${ISO_NAME}.sha256'
-# 校验/MD5 先落、ISO 最后落:若中途断,目标目录是"旧 ISO+旧 sidecar"或"新 sidecar 无新 ISO",
-# render 按 ISO glob 仍指向旧盘(安全),绝不出现"新 ISO 无校验文件"被无校验渲染。
-mv -f '${ISO_NAME}.sha256' '${ISO_NAME}.md5' '${M_ISODIR}/'
-mv -f '${ISO_NAME}' '${M_ISODIR}/'
-# 上线后回读:对 live 里 mv 完的 ISO 再算一次 sha256,确认镜像站文件系统上服务的就是本锅
-cd '${M_ISODIR}'
-echo '${SHA}  ${ISO_NAME}' | sha256sum -c - || { echo '[错误] 上线后 live sha256 与本锅不符(mv 截断/被并发清理?)'; exit 1; }
-echo '[OK] 已上线且 live 回读 sha256 一致:${ISO_NAME}'
-REMOTE
-    [ $? -eq 0 ] && UPLOAD_OK=1
+log "R2:上传 ${ISO_NAME}(+校验)到 bucket ${R2_BUCKET}…"
+if ! rclone copyto "${STAGE}/${ISO_NAME}" "R2:${R2_BUCKET}/${ISO_NAME}" --s3-no-check-bucket --s3-chunk-size 64M --retries 5 2>>"${LOG}"; then
+    log "[警告] R2 上传失败,但 ISO 已验证+暂存:${STAGE}/${ISO_NAME}"
+    log "  待 R2 恢复,手动重传(不必重编):sudo /opt/live-iso-builder/reupload-iso.sh"
+    notify FAILED "R2 上传失败但 ISO 已验证+暂存:${ISO_NAME};恢复后跑 reupload-iso.sh(勿重编);用时 $(fmt_dur)、$(date '+%F %T')"
+    NOTIFIED=1; cleanup_mounts; exit 1
 fi
+for e in sha256 md5; do [ -f "${STAGE}/${ISO_NAME}.${e}" ] && rclone copyto "${STAGE}/${ISO_NAME}.${e}" "R2:${R2_BUCKET}/${ISO_NAME}.${e}" --s3-no-check-bucket --retries 5 2>>"${LOG}"; done
 
-if [ "${UPLOAD_OK}" != 1 ]; then
-    log "[警告] 上传/上线失败(下载站可能临时不可达),但 ISO 已验证通过并暂存:"
-    log "    ${STAGE}/${ISO_NAME}"
-    log "  待下载站恢复,手动重传(不必重编):sudo /opt/live-iso-builder/reupload-iso.sh"
-    notify FAILED "上传失败但 ISO 已验证+暂存:${ISO_NAME};下载站恢复后跑 reupload-iso.sh(勿重编);用时 $(fmt_dur)、$(date '+%F %T')"
-    NOTIFIED=1
-    cleanup_mounts; exit 1
+# 端到端核对 1:R2 公开域名实际服务的就是本锅(content-length == 本地大小)
+loc_size=$(stat -c%s "${STAGE}/${ISO_NAME}" 2>/dev/null)
+pub_len=$(curl -fsSL -H 'Cache-Control: no-cache' -I "${R2_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
+if [ -z "${loc_size:-}" ] || [ "${pub_len:-0}" != "${loc_size}" ]; then
+    fail "R2 对外核对失败:${R2_PUBLIC_BASE}/${ISO_NAME} content-length=${pub_len:-空} != 本地 ${loc_size:-空}(已上传但站上不一致)"
 fi
+log "[OK] R2 已发布且对外核对一致:${R2_PUBLIC_BASE}/${ISO_NAME}(${loc_size} bytes)"
 
-log "下载站:保留最近 ${KEEP} 份,删更旧的(上线成功后才清理,且本锅 ${ISO_NAME} 永不删)…"
-retry ${SSH} "${M_USER}@${M_HOST}" "ISO_DIR='${M_ISODIR}' KEEP=${KEEP} KEEPNAME='${ISO_NAME}' /usr/local/bin/cleanup-old-iso.sh" || { log "远程清理告警"; notify WARN "下载站清理旧版失败,旧盘可能堆积撑盘,请留意:${ISO_NAME}"; }
-log "下载站:渲染落地页…"
-retry ${SSH} "${M_USER}@${M_HOST}" "SKIP_SHA_SELFCHECK=1 /usr/local/bin/render-index.sh" || log "落地页渲染告警(ISO 已上线,仅页面未刷新)"
-# ── 端到端核对:镜像站对外【实际服务】的就是本锅,否则视同白跑(编译了没更新/上线了旧盘)──
-verify_published "${ISO_NAME}" "${SHA}" || fail "端到端核对失败:镜像站对外服务的不是本锅 ${ISO_NAME}(已上传但站上不一致)"
-log "下载站当前空间与列表:"
-${SSH} "${M_USER}@${M_HOST}" "df -h /srv | tail -1; ls -lh '${M_ISODIR}'/gig-os-*.iso 2>/dev/null" >>"${LOG}" 2>&1
-
-# ── 6b. 上传到 Cloudflare R2（零出口流量；保留 R2_KEEP 份；失败仅告警，站上已上线不影响本锅成功）──
-#   从 SSD 暂存（STAGE）取已验证 ISO 上传；R2_* 缺任一或无 rclone 则跳过。
-if [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ENDPOINT:-}" ] && command -v rclone >/dev/null 2>&1; then
-    R2_KEEP="${R2_KEEP:-3}"; R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://r2.gentoozh.org}"
-    export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare RCLONE_CONFIG_R2_REGION=auto
-    export RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT}"
-    log "R2：上传 ${ISO_NAME}（+校验）到 bucket ${R2_BUCKET}…"
-    if rclone copyto "${STAGE}/${ISO_NAME}" "R2:${R2_BUCKET}/${ISO_NAME}" --s3-no-check-bucket --s3-chunk-size 64M --retries 5 2>>"${LOG}"; then
-        for e in sha256 md5; do [ -f "${STAGE}/${ISO_NAME}.${e}" ] && rclone copyto "${STAGE}/${ISO_NAME}.${e}" "R2:${R2_BUCKET}/${ISO_NAME}.${e}" --s3-no-check-bucket --retries 5 2>>"${LOG}"; done
-        # 对外核对：R2 远端大小 + 公开域名 content-length 都等于本地
-        r2_remote=$(rclone size "R2:${R2_BUCKET}/${ISO_NAME}" --json 2>>"${LOG}" | grep -oE '"bytes":[0-9]+' | grep -oE '[0-9]+')
-        loc_size=$(stat -c%s "${STAGE}/${ISO_NAME}" 2>/dev/null)
-        pub_len=$(curl -fsSLI "${R2_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
-        if [ -n "${loc_size:-}" ] && [ "${r2_remote:-0}" = "${loc_size}" ] && [ "${pub_len:-0}" = "${loc_size}" ]; then
-            log "[OK] R2 上线并通过对外核对：${R2_PUBLIC_BASE}/${ISO_NAME}（${loc_size} bytes）"
-            mapfile -t _r2 < <(rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
-            _i=0; for f in "${_r2[@]}"; do _i=$((_i+1)); [ "${_i}" -le "${R2_KEEP}" ] && continue; [ "${f}" = "${ISO_NAME}" ] && continue
-                log "R2 删旧：${f}（含 .sha256/.md5）"; rclone deletefile "R2:${R2_BUCKET}/${f}" 2>>"${LOG}" || true
-                rclone deletefile "R2:${R2_BUCKET}/${f}.sha256" 2>>"${LOG}" || true; rclone deletefile "R2:${R2_BUCKET}/${f}.md5" 2>>"${LOG}" || true
-            done
-        else
-            log "[警告] R2 对外核对不一致（remote=${r2_remote:-空} pub=${pub_len:-空} local=${loc_size:-空}）"; notify WARN "R2 已传但对外核对不一致：${ISO_NAME}"
-        fi
-    else
-        log "[警告] R2 上传失败（站上已上线，不影响本锅成功）"; notify WARN "R2 上传失败：${ISO_NAME}（站上已上线）"
-    fi
+# 端到端核对 2:mirror 落地页(Worker 即时读 R2)已列出本锅文件名(cache-bust + 重试等边缘刷新)
+mirror_ok=0
+for i in 1 2 3 4 5 6; do
+    if curl -fsSL -H 'Cache-Control: no-cache' "${MIRROR_URL}?_=$(date +%s)-${i}" 2>/dev/null | grep -qF "${ISO_NAME}"; then mirror_ok=1; break; fi
+    log "  mirror 落地页暂未反映 ${ISO_NAME},20s 后重试(${i}/6)…"; sleep 20
+done
+if [ "${mirror_ok}" = 1 ]; then
+    log "[OK] mirror 落地页已反映新镜像:${MIRROR_URL}(${ISO_NAME})"
 else
-    log "R2 未配置或无 rclone，跳过 R2 上传（仅发布到镜像站）"
+    log "[警告] mirror 落地页 ~2 分钟内未反映 ${ISO_NAME}(R2 已上线;Worker 边缘缓存延迟?)"
+    notify WARN "R2 已上线但 mirror 落地页未及时反映:${ISO_NAME}(稍后手动看 ${MIRROR_URL})"
 fi
+
+# 保留最近 R2_KEEP 份(gig-os-YYYYMMDD.iso),删更旧的;本锅永不删
+mapfile -t _r2 < <(rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
+_i=0; for f in "${_r2[@]}"; do _i=$((_i+1)); [ "${_i}" -le "${R2_KEEP}" ] && continue; [ "${f}" = "${ISO_NAME}" ] && continue
+    log "R2 删旧:${f}(含 .sha256/.md5)"; rclone deletefile "R2:${R2_BUCKET}/${f}" 2>>"${LOG}" || true
+    rclone deletefile "R2:${R2_BUCKET}/${f}.sha256" 2>>"${LOG}" || true; rclone deletefile "R2:${R2_BUCKET}/${f}.md5" 2>>"${LOG}" || true
+done
+PUBLISHED_VERIFIED=ok
 
 # ── 7. 收尾（tmpfs 整块释放，零 SSD 残留）────────────────────
 # OK 文案据 PUBLISHED_VERIFIED 如实写:ok=已通过对外核对;skip=M_URLBASE 未配、未做核对(别谎称已核对)
