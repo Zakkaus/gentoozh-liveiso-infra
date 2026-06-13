@@ -612,14 +612,15 @@ find "${STAGE}" -maxdepth 1 -name 'gig-os-*.iso*' \
      ! -name "${ISO_NAME}" ! -name "${ISO_NAME}.md5" ! -name "${ISO_NAME}.sha256" -delete 2>/dev/null || true
 rm -f "${STAGE}/BUILD_MANIFEST" "${STAGE}/BUILD_MANIFEST.tmp" 2>/dev/null || true
 # manifest 先写 .tmp 再原子 mv,杜绝半截 manifest 被 reupload 读到
+# 值一律加引号:BUILD_DONE 含空格(YYYY-MM-DD HH:MM:SS),不引号 source 时会被当命令跑(报错)
 cat > "${STAGE}/BUILD_MANIFEST.tmp" <<MANI
-RUN_STAMP=${STAMP}
-GIT_COMMIT=${GIT_COMMIT}
-GIT_BRANCH=${REPO_BRANCH}
-ISO_NAME=${ISO_NAME}
-ISO_SHA256=${SHA}
-ISO_SIZE=${ISO_SIZE}
-BUILD_DONE=$(date '+%F %T')
+RUN_STAMP="${STAMP}"
+GIT_COMMIT="${GIT_COMMIT}"
+GIT_BRANCH="${REPO_BRANCH}"
+ISO_NAME="${ISO_NAME}"
+ISO_SHA256="${SHA}"
+ISO_SIZE="${ISO_SIZE}"
+BUILD_DONE="$(date '+%F %T')"
 MANI
 mv -f "${STAGE}/BUILD_MANIFEST.tmp" "${STAGE}/BUILD_MANIFEST" || fail "写 BUILD_MANIFEST 失败"
 log "[OK] 验证通过的 ISO 已暂存 + 写 BUILD_MANIFEST:stamp=${STAMP} sha=${SHA:0:12}… iso=${ISO_NAME}(上传失败也不会丢)"
