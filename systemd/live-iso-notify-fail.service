@@ -1,0 +1,14 @@
+[Unit]
+Description=Live ISO 构建失败时发 Telegram(补 wrapper 够不着的早期/语法体检失败盲区)
+# 由 live-iso-build.service 的 OnFailure= 触发。本身不设 OnFailure,避免自递归。
+
+[Service]
+Type=oneshot
+# 复用同一 config.env 取密钥(零密钥入库);curl 失败 || true,不让"通知"本身再失败。
+# 两个关键点:
+#  1) selfnotified 哨兵:wrapper 自己已发过 FAILED(fail/on_exit)就会落该哨兵,这里见到即退,不重复吼。
+#     wrapper 连自报都做不到时(SIGKILL/OOM/语法体检不过/config 缺/非 root 等极早期)哨兵不在 → 由本 unit 兜底。
+#  2) systemd 会对 ExecStart 做变量替换,$VAR(未在 Environment 定义)会被替换成空 → 必须写 $$TG_TOKEN,
+#     让 systemd 传字面 $、由 bash 在 source config.env 后自己展开,否则 token 取空、curl 永不发(等于静默)。
+# 文案中性、不预设阶段(本 unit 也会在"构建几小时后超时被杀"时触发),只指向 journalctl 排查。
+ExecStart=/bin/bash -c '[ -e /run/live-iso-build.selfnotified ] && exit 0; . /opt/live-iso-builder/config.env 2>/dev/null; [ -n "$$TG_TOKEN" ] && [ -n "$$TG_CHAT" ] && curl -fsS -m 20 "https://api.telegram.org/bot$$TG_TOKEN/sendMessage" -d "chat_id=$$TG_CHAT" --data-urlencode "text=[FAILED] gig-os 构建:service 进入 failed(语法体检/config 缺/极早期退出,或构建中途被杀);查 journalctl -u live-iso-build" >/dev/null 2>&1 || true'
