@@ -101,10 +101,10 @@ on_exit() {
 }
 
 # 防并发 + 忙时延后
-# wrapper 级锁（build.sh 自己也有一把）：同一时刻只允许一锅在跑。
+# wrapper 级锁（build.sh 自己也有一把）：同一时刻只允许一次构建。
 acquire_lock() {
     exec 9>"${LOCK}"
-    flock -n 9 || { echo "已有构建在跑（${LOCK} 被占），退出。"; exit 0; }
+    flock -n 9 || { echo "已有构建在执行（${LOCK} 被占），退出。"; exit 0; }
 }
 
 # 整机 CPU 使用率（%，整数）：采两次 /proc/stat、间隔 1s。
@@ -333,7 +333,7 @@ verify_iso() {
 }
 
 # 5. 暂存到 SSD，上传失败可重传而不必重编。
-# 上传瞬时失败时，tmpfs 里的成品已被 cleanup 清掉，只能重编几小时。先把验证通过的 ISO 拷到
+# 上传瞬时失败时，tmpfs 里的成品已被 cleanup 清除，只能重编几小时。先把验证通过的 ISO 拷到
 # SSD，之后所有上传从 SSD 取。BUILD_MANIFEST 与 ISO 同生同死，reupload-iso.sh 据它判断
 # 有没有可重传的盘，不盲传旧盘。
 stage_iso() {
@@ -364,7 +364,7 @@ publish_r2() {
     if ! rclone copyto "${STAGE}/${ISO_NAME}" "R2:${R2_BUCKET}/${ISO_NAME}" \
             --s3-no-check-bucket --s3-chunk-size 64M --retries 5 2>>"${LOG}"; then
         log "[警告] R2 上传失败，但 ISO 已验证+暂存：${STAGE}/${ISO_NAME}"
-        notify FAILED "R2 上传失败但 ISO 已暂存：${ISO_NAME}；恢复后跑 reupload-iso.sh（勿重编）；用时 $(fmt_dur)、$(date '+%F %T')"
+        notify FAILED "R2 上传失败但 ISO 已暂存：${ISO_NAME}；恢复后执行 reupload-iso.sh（勿重编）；用时 $(fmt_dur)、$(date '+%F %T')"
         NOTIFIED=1; cleanup_mounts; exit 1
     fi
     local e

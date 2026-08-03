@@ -18,7 +18,7 @@ if [ -f "${MC}/common" ]; then
     sed -i 's/^MAKEOPTS=.*/MAKEOPTS="-j4"/' "${MC}/common"
 fi
 
-# 3. 清掉 @world 的 autounmask 在构建期写的 zz-autounmask（USE / keyword pin 等），
+# 3. 清除 @world 的 autounmask 在构建期写的 zz-autounmask（USE / keyword pin 等），
 #    不让这些构建期解析产物进 ISO 污染用户的 portage 配置。
 PRT="$(dirname "${MC}")"
 rm -f "${PRT}/package.use/zz-autounmask" "${PRT}/package.accept_keywords/zz-autounmask" \
