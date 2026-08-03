@@ -28,9 +28,9 @@ on_exit(){ local rc=$?; [ "$DONE" = 1 ] && return 0; [ "$NOTIFIED" = 1 ] && retu
 trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 trap on_exit EXIT
 
-# 防并发：与自动构建共用同一把锁(构建在跑就别同时重传，避免互删 R2 旧盘 / 并发上传)
+# 防并发：与自动构建共用同一把锁(构建执行期间不重传，避免互删 R2 旧盘与并发上传)
 exec 9>"$LOCK"
-flock -n 9 || { echo "[错误] 已有构建/重传在跑($LOCK 被占),退出"; DONE=1; exit 0; }
+flock -n 9 || { echo "[错误] 已有构建或重传在执行($LOCK 被占),退出"; DONE=1; exit 0; }
 
 # ── R2 配置闸：缺 R2_* 直接拒绝(R2 是唯一发布目标)──────────────
 [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ENDPOINT:-}" ] \

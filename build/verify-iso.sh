@@ -219,7 +219,7 @@ else echo "  ? 没找到 grub.cfg(可能在 EFI 镜像内)"; fi
 echo
 echo "--- 10. ISO 内无密钥/拓扑泄漏(关键安全)---"
 # 红线：本脚本入库，绝不写死 token/IP。从 config.env(600 root,本机才有)读取要扫的敏感串。
-# 非 root 跑(读不到 config.env)时,token/IP 扫描自动跳过，但 config.env 文件与私钥扫描仍生效。
+# 以非 root 执行而无法读取 config.env 时,token/IP 扫描自动跳过，但 config.env 文件与私钥扫描仍生效。
 LEAK=0
 CFG="${CONFIG_ENV:-/opt/live-iso-builder/config.env}"
 # shellcheck disable=SC1090

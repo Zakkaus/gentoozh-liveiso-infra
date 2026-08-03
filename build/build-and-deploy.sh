@@ -1,9 +1,8 @@
 #!/bin/bash
 # Gentoo 中文社区 Live ISO 自动构建 + Cloudflare R2 发布
 #
-# 职责：拉源码 → tmpfs 内存里跑 build.sh 构建 → 完整性验证 → 发布 R2 → 通知 Telegram。
-# 只做编排；构建本身（防并发锁、overlay、@world、出厂内容等）都在 Live-ISO 仓库的 build.sh。
-# 由 systemd timer 触发，需 root（build.sh 要求 root）。
+# 拉源码、执行 build.sh、验证、发布 R2、通知 Telegram。只做编排，构建本身在 Live-ISO 的 build.sh。
+# 由 systemd timer 触发，需 root。
 
 set -uo pipefail
 
@@ -264,21 +263,21 @@ prepare_workdir() {
     export BINPKG_CACHE="${CACHE_BINPKG}"           # build.sh 据此把宿主缓存 bind 进 chroot
     export DISTFILES_CACHE="${CACHE_DISTFILES}"
 
-    # build-host make.conf 调优（仅构建机；出厂前由 99-sanitize hook 删除、exclude.txt 再兜底）。
-    # zz- 前缀让它按字母序最后加载、覆盖 common 的默认值。-merge-sync / CONFIG_PROTECT 那类
-    # 构建期 workaround 不在这里、由 build.sh 在对应 emerge 上内联设置。
-    #   --usepkg/--buildpkg：编完的包打成 binpkg 存缓存，下次只重编有更新的（几小时→几十分钟）
-    #   --load-average：load 到顶就暂停放新包，防满核内存雪崩
+    # 仅构建机用的 make.conf 调优，出厂前由 99-sanitize 删除、exclude.txt 兜底。
+    # zz- 前缀让它按字母序最后加载以覆盖 common。-merge-sync 一类构建期 workaround 不在这里，
+    # 由 build.sh 在对应 emerge 上内联设置。
+    #   --usepkg/--buildpkg 把编完的包存成 binpkg，下次只重编有更新的
+    #   --load-average 在 load 到顶时暂停放新包，防满核内存雪崩
     cat > "${WORK}/include-squashfs/etc/portage/make.conf/zz-buildhost" <<EOF
 MAKEOPTS="-j${CORES} -l${CORES}"
 EMERGE_DEFAULT_OPTS="--load-average=${CORES} --quiet-build=y --usepkg --buildpkg"
 FEATURES="\${FEATURES} buildpkg"
 EOF
 
-    # 清掉持久缓存里所有 9999/live 包的 binpkg。这些包版本号恒为 9999，git 源更新了 portage 也不会
-    # 重打，--usepkg 会复用陈旧 binpkg → 装进旧版（如 calamares 装机清理逻辑缺失）。每锅强制从 git
-    # 重编。删 binpkg 文件后必须重建 Packages 索引，否则 portage 仍按旧索引调度已删的包、报
-    # "non-existent binary" 而失败。非 9999 包的缓存照常复用、不影响增量加速。
+    # 清除缓存里所有 9999 包的 binpkg。它们版本号恒为 9999，git 源更新后 portage 不会重打，
+    # --usepkg 会复用陈旧 binpkg，装进缺功能的旧版。删文件后必须重建 Packages 索引，
+    # 否则 portage 按旧索引调度已删的包，报 non-existent binary 失败。
+    # 非 9999 包的缓存照常复用。
     mkdir -p "${CACHE_BINPKG}" "${CACHE_DISTFILES}"
     local purged
     purged=$(find "${CACHE_BINPKG}" -type f -name '*-9999*' 2>/dev/null | wc -l)
@@ -333,10 +332,10 @@ verify_iso() {
     SHA="$(awk '{print $1}' "${WORK}/${ISO_NAME}.sha256")"
 }
 
-# 5. 暂存到 SSD（上传失败可重传、不必重编）
-# 上传是网络操作、可能瞬时失败；若失败时 tmpfs 里的成品已被 cleanup 清掉，就得重编几小时。
-# 先把验证通过的 ISO 拷到 SSD，之后所有上传从 SSD 取。BUILD_MANIFEST 与 ISO 同生同死：
-# 有 manifest ⟺ 本锅成功暂存（reupload-iso.sh 据此判断有没有可重传的盘、不盲传旧盘）。
+# 5. 暂存到 SSD，上传失败可重传而不必重编。
+# 上传瞬时失败时，tmpfs 里的成品已被 cleanup 清掉，只能重编几小时。先把验证通过的 ISO 拷到
+# SSD，之后所有上传从 SSD 取。BUILD_MANIFEST 与 ISO 同生同死，reupload-iso.sh 据它判断
+# 有没有可重传的盘，不盲传旧盘。
 stage_iso() {
     mkdir -p "${STAGE}"
     # 先落新盘、再删旧盘：避免"先删旧、拷新前被杀"两头空。
