@@ -161,7 +161,18 @@ fi
 if grep -rqE '^CPU_FLAGS_X86=' "${MC}/" 2>/dev/null; then
   grep -rq 'gigos-auto-cpuflags' "${MC}/" 2>/dev/null && ok "CPU_FLAGS_X86 为出厂安全基线(带 gigos-auto-cpuflags 标记，开机按本机 cpuid2cpuflags 覆盖)" || no "CPU_FLAGS_X86 有固定值但无 gigos-auto-cpuflags 标记(疑似构建机泄漏)"
 else ok "CPU_FLAGS_X86 已清(改 cpuid2cpuflags 生成)"; fi
-grep -rq 'aliyun' "${MC}/mirror" 2>/dev/null && ok "GENTOO_MIRRORS=阿里云" || echo "  ? mirror 非阿里云"
+# 出厂基线是海外源，开机后由 gigos-mirror 按出口 IP 或语言改写。这里只核对标记与基线值，
+# 不核对具体某家镜像，换镜像清单不该让发布闸门误报。
+if grep -q 'gigos-auto-mirror' "${MC}/mirror" 2>/dev/null; then
+  grep -q 'distfiles.gentoo.org' "${MC}/mirror" 2>/dev/null \
+    && ok "GENTOO_MIRRORS 为带标记的海外基线" \
+    || no "GENTOO_MIRRORS 带标记但非海外基线(出厂应是海外，就近由 gigos-mirror 开机改写)"
+else
+  no "GENTOO_MIRRORS 缺 gigos-auto-mirror 标记(gigos-mirror 将不再自动改写)"
+fi
+[ -e "${R}/etc/portage/repos.conf/zz-gigos-mirror.conf" ] \
+  && bad "运行期生成的 zz-gigos-mirror.conf 混进 ISO(会把构建机所在地区的源发给所有人)" \
+  || ok "repos.conf 无运行期覆盖文件"
 grep -rqE 'buildpkg|--usepkg' "${MC}/" 2>/dev/null && bad "构建调优泄漏(buildpkg/usepkg,用户 emerge 会塞满盘)" || ok "无构建调优泄漏"
 ls "${R}"/var/cache/binpkgs/* >/dev/null 2>&1 && bad "binpkg 残留进 ISO(体积暴涨)" || ok "binpkg 未进 ISO"
 
