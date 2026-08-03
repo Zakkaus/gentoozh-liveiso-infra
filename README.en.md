@@ -19,9 +19,11 @@ two drift apart.
 | In this repository | Deployed to |
 |---|---|
 | `build/*.sh` | `/opt/live-iso-builder/` |
-| `build/hooks/*.sh` | `/opt/live-iso-builder/hooks/` |
 | `systemd/*` | `/etc/systemd/system/` |
 | `config.env.example` | copy to `/opt/live-iso-builder/config.env` and fill it in |
+
+The release gate `99-sanitize-for-release.sh` is **not in this repository**. It lives in `hooks/` in
+[Live-ISO](https://github.com/Gig-OS/Live-ISO) and is sourced directly by `build.sh`; edit it there.
 
 Steps:
 

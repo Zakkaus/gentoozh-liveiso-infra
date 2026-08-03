@@ -13,9 +13,10 @@ Gentoo 中文社区 Live ISO 的自动构建与发布脚本。产物是 KDE Plas
 | 仓库内 | 部署到 |
 |---|---|
 | `build/*.sh` | `/opt/live-iso-builder/` |
-| `build/hooks/*.sh` | `/opt/live-iso-builder/hooks/` |
 | `systemd/*` | `/etc/systemd/system/` |
 | `config.env.example` | 复制成 `/opt/live-iso-builder/config.env` 并填写 |
+
+出厂清理的闸门脚本 `99-sanitize-for-release.sh` **不在本仓库**，它在 [Live-ISO](https://github.com/Gig-OS/Live-ISO) 的 `hooks/` 里，由 `build.sh` 直接 source。改闸门要改那边。
 
 步骤：
 
