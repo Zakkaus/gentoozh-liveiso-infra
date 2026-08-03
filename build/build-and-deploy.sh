@@ -159,7 +159,7 @@ preflight_overlays() {
     log "  [OK] settings-gig 仓库可达"
     # gentoo-zh / guru 提供 flclash 等非装机刚需包，不可达不阻断（只少装非关键包）。
     local ov
-    for ov in "gentoo-zh|https://github.com/gentoo-zh/overlay.git" "guru|https://github.com/gentoo-mirror/guru.git"; do
+    for ov in "gentoo-zh|https://mirrors.cernet.edu.cn/gentoo-zh.git" "guru|https://github.com/gentoo-mirror/guru.git"; do
         git_reachable "${ov##*|}" || log "[警告] ${ov%%|*} overlay 暂不可达（非刚需，继续）"
     done
 }
