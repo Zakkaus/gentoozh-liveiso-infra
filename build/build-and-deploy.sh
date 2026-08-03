@@ -7,7 +7,7 @@
 
 set -uo pipefail
 
-# ===================== 配置 =====================
+# 配置
 # 路径与调优写这里；密钥（R2 token / Telegram）从 config.env 读、不入库。
 SELF_DIR="$(dirname "$(readlink -f "$0")")"
 PERSIST="/opt/live-iso-builder"             # 持久目录：脚本 + 源码副本 + 缓存 + 日志
@@ -18,16 +18,16 @@ CACHE_BINPKG="${PERSIST}/cache/binpkgs"     # 跨构建复用的 binpkg 缓存�
 CACHE_DISTFILES="${PERSIST}/cache/distfiles"
 
 USE_TMPFS="${USE_TMPFS:-0}"                  # 1=工作区挂 tmpfs 跑在内存;0=直接落磁盘。
-                                            # 因为这台是共享机、别的编译也要内存,所以默认落磁盘;
-                                            # 实测峰值约 23G,磁盘足够,速度差别由 binpkg 缓存补回。
+                                            # 因为这台是共享机、别的编译也要内存，所以默认落磁盘；
+                                            # 实测峰值约 23G,磁盘足够，速度差别由 binpkg 缓存补回。
 TMPROOT="/mnt/isobuild"                     # 工作区根目录（USE_TMPFS=1 时是 tmpfs 挂载点）
 WORK="${TMPROOT}/Live-ISO"                  # 本次构建工作副本
-TMPFS_SIZE="72G"                            # 实测峰值仅 23G,72G 仍有 3 倍余量;共享机上留更多内存给其他任务
+TMPFS_SIZE="72G"                            # 实测峰值仅 23G,72G 仍有 3 倍余量；共享机上留更多内存给其他任务
 LOCK="/run/live-iso-build.lock"
 SELFNOTIFIED="/run/live-iso-build.selfnotified"
 
 REPO_URL="https://github.com/Gig-OS/Live-ISO.git"
-REPO_BRANCH="KDE"                           # Gig-OS 上游的构建分支,社区 fork 的改动已合并至此
+REPO_BRANCH="KDE"                           # Gig-OS 上游的构建分支，社区 fork 的改动已合并至此
 CORES="$(nproc)"
 
 # CPU 忙时延后：开跑前整机 CPU ≥ BUSY_PCT 就睡 DEFER_MIN 分钟再查，最多 MAX_DEFERS 次
@@ -54,7 +54,7 @@ BUILD_START="$(date +%s)"
 GIT_COMMIT=""; ISO=""; ISO_NAME=""; ISO_SIZE=""; SHA=""; MIRROR_NOTE=""
 DONE=0; NOTIFIED=0      # 进程内哨兵：DONE=走到正常终点；NOTIFIED=已显式通知过。供退出陷阱去重。
 
-# ===================== 日志 / 通知 =====================
+# 日志 / 通知
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "${LOG}"; }
 
 fmt_dur() { local d=$(( $(date +%s) - BUILD_START )); printf '%d时%d分' $((d/3600)) $(((d%3600)/60)); }
@@ -74,7 +74,7 @@ fail() {
     NOTIFIED=1; cleanup_mounts; exit 1
 }
 
-# ===================== 挂载清理 + 退出陷阱 =====================
+# 挂载清理 + 退出陷阱
 # 卸载 build.sh 在 squashfs 里建的 bind/tmpfs，再拆掉 tmpfs 工作区本身（逆序卸，兜底）。
 cleanup_mounts() {
     [ "${PRESERVE:-0}" = 1 ] && { log "PRESERVE=1：保留 tmpfs ${TMPROOT} 待查（手动 umount -R）"; return 0; }
@@ -101,7 +101,7 @@ on_exit() {
     cleanup_mounts
 }
 
-# ===================== 防并发 + 忙时延后 =====================
+# 防并发 + 忙时延后
 # wrapper 级锁（build.sh 自己也有一把）：同一时刻只允许一锅在跑。
 acquire_lock() {
     exec 9>"${LOCK}"
@@ -134,7 +134,7 @@ wait_for_idle_cpu() {
     log "延后达上限（CPU 仍 $(cpu_busy_pct)%），照常开始构建。"
 }
 
-# ===================== 预检（开跑前几秒查清硬性前置，失败即 fail，不白烧几小时）=====================
+# 预检（开跑前几秒查清硬性前置，失败即 fail，不白烧几小时）
 # git 仓库可达性，3 次退避重试（瞬时 TLS/DNS/5xx 抖动不该毙整锅）。
 git_reachable() {
     local n=0
@@ -154,7 +154,7 @@ preflight_overlays() {
     local eb
     eb=$(curl -fsS -m 20 "https://api.github.com/repos/Gig-OS/gig/contents/app-admin/calamares" 2>/dev/null \
          | grep -oE 'calamares-3\.3\.14-r[0-9]+\.ebuild' | head -1)
-    [ -n "${eb}" ] && log "  [OK] gig overlay 含 ${eb}" || log "  [警告] 未能经 API 确认 calamares ebuild（限流?），不阻断"
+    [ -n "${eb}" ] && log "  [OK] gig overlay 含 ${eb}" || log "  [警告] 未能经 API 确认 calamares ebuild（限流？），不阻断"
     git_reachable https://github.com/Gentoo-zh/calamares-settings-gig.git \
         || { log "[错误] Gentoo-zh/calamares-settings-gig fork 连续 3 次不可达"; return 1; }
     log "  [OK] settings-gig fork 可达"
@@ -215,7 +215,7 @@ preflight() {
     log "[OK] 预检全过"
 }
 
-# ===================== 1. 更新源仓库 =====================
+# 1. 更新源仓库
 # 网络 git 操作一律加 timeout，跨境 TLS 卡死时不至于无限挂（既不 START 也不 FAILED 的盲窗）。
 update_source() {
     log "更新源仓库 ${SRC}（${REPO_URL} @ ${REPO_BRANCH}）…"
@@ -240,7 +240,7 @@ update_source() {
         && notify WARN "源码非最新：本锅 ${GIT_COMMIT} != origin ${remote_head}（fetch 可能失败、用了旧副本）"
 }
 
-# ===================== 2. 准备工作区 =====================
+# 2. 准备工作区
 # tmpfs 全内存构建（省 SSD），拷贝源码副本，注入 build-host 调优 + env，装出厂清理 hook。
 prepare_workdir() {
     cleanup_mounts                                  # 防上次残留
@@ -294,7 +294,7 @@ EOF
     log "已补 exclude.txt 兜底(出厂清理用仓库内 hook)"
 }
 
-# ===================== 3. 跑构建 =====================
+# 3. 跑构建
 run_build() {
     log "开始构建（日志同上，预计数小时）…"
     cd "${WORK}" || fail "cd 失败"
@@ -302,7 +302,7 @@ run_build() {
     log "[OK] build.sh 完成"
 }
 
-# ===================== 4. 定位产物 + 完整性验证 + 校验和 =====================
+# 4. 定位产物 + 完整性验证 + 校验和
 # verify-iso.sh 挂 squashfs 实检 calamares/rime/字体/locale/双驱动等；rc 0=全过 1=仅警告 2=关键缺失。
 verify_iso() {
     ISO="$(ls -1t "${WORK}"/gig-os-*.iso 2>/dev/null | head -n1)"
@@ -333,7 +333,7 @@ verify_iso() {
     SHA="$(awk '{print $1}' "${WORK}/${ISO_NAME}.sha256")"
 }
 
-# ===================== 5. 暂存到 SSD（上传失败可重传、不必重编）=====================
+# 5. 暂存到 SSD（上传失败可重传、不必重编）
 # 上传是网络操作、可能瞬时失败；若失败时 tmpfs 里的成品已被 cleanup 清掉，就得重编几小时。
 # 先把验证通过的 ISO 拷到 SSD，之后所有上传从 SSD 取。BUILD_MANIFEST 与 ISO 同生同死：
 # 有 manifest ⟺ 本锅成功暂存（reupload-iso.sh 据此判断有没有可重传的盘、不盲传旧盘）。
@@ -359,7 +359,7 @@ EOF
     log "[OK] ISO 已暂存 + 写 manifest：sha=${SHA:0:12}…（上传失败也不会丢）"
 }
 
-# ===================== 6. 发布到 R2 + 端到端核对 + 清旧 =====================
+# 6. 发布到 R2 + 端到端核对 + 清旧
 publish_r2() {
     log "R2：上传 ${ISO_NAME} 到 bucket ${R2_BUCKET}…"
     if ! rclone copyto "${STAGE}/${ISO_NAME}" "R2:${R2_BUCKET}/${ISO_NAME}" \
@@ -412,7 +412,7 @@ publish_r2() {
     done < <(rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
 }
 
-# ===================== 7. 收尾 =====================
+# 7. 收尾
 finish() {
     log "===== [OK] 全部完成：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）====="
     notify OK "成功：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）已上线 R2 并通过对外核对（sha ${SHA:0:12}…）iso.gentoozh.org${MIRROR_NOTE}；用时 $(fmt_dur)、$(date '+%F %T')"
@@ -420,7 +420,7 @@ finish() {
     ls -1t "${LOG_DIR}"/build-*.log 2>/dev/null | tail -n +11 | xargs -r rm -f   # 只留最近 10 份日志
 }
 
-# ===================== 主流程 =====================
+# 主流程
 main() {
     (( EUID == 0 )) || { echo "需以 root 运行"; exit 1; }
     acquire_lock
