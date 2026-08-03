@@ -9,7 +9,7 @@ OnFailure=live-iso-notify-fail.service
 [Service]
 Type=oneshot
 # 启动几小时构建【之前】对 wrapper 及运行期会调用的脚本做 bash -n 语法体检(ms 级，零执行)。
-# 任一语法错 → service 直接 failed、永不进入构建——根治"崩在 stage 前的静默白跑"那类根因。
+# 任一语法错即让 service failed，不进入构建，避免在 stage 之前静默失败。
 # 只检构建机本地三脚本(render/cleanup 在镜像站，路径不在本机，不能列入否则误失败)。
 ExecStartPre=/bin/bash -n /opt/live-iso-builder/build-and-deploy.sh
 ExecStartPre=/bin/bash -n /opt/live-iso-builder/verify-iso.sh
