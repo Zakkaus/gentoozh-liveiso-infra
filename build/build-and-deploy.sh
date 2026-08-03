@@ -16,16 +16,18 @@ STAGE="${PERSIST}/last-iso"                 # 验证通过的 ISO 暂存（上�
 LOG_DIR="${PERSIST}/logs"
 CACHE_BINPKG="${PERSIST}/cache/binpkgs"     # 跨构建复用的 binpkg 缓存（落 SSD）
 CACHE_DISTFILES="${PERSIST}/cache/distfiles"
-HOOK_SANITIZE="${SELF_DIR}/hooks/99-sanitize-for-release.sh"   # 出厂清理 hook（独立文件）
 
-TMPROOT="/mnt/isobuild"                     # tmpfs 挂载点（构建全程在内存）
+USE_TMPFS="${USE_TMPFS:-0}"                  # 1=工作区挂 tmpfs 跑在内存;0=直接落磁盘。
+                                            # 因为这台是共享机、别的编译也要内存,所以默认落磁盘;
+                                            # 实测峰值约 23G,磁盘足够,速度差别由 binpkg 缓存补回。
+TMPROOT="/mnt/isobuild"                     # 工作区根目录（USE_TMPFS=1 时是 tmpfs 挂载点）
 WORK="${TMPROOT}/Live-ISO"                  # 本次构建工作副本
-TMPFS_SIZE="88G"                            # 物理 RAM 94G，留 ~6G 给系统
+TMPFS_SIZE="72G"                            # 实测峰值仅 23G,72G 仍有 3 倍余量;共享机上留更多内存给其他任务
 LOCK="/run/live-iso-build.lock"
 SELFNOTIFIED="/run/live-iso-build.selfnotified"
 
-REPO_URL="https://github.com/Gentoo-zh/Live-ISO.git"
-REPO_BRANCH="main"                          # 重构后的构建脚本在 main；KDE 是重构前旧分支、留回退
+REPO_URL="https://github.com/Gig-OS/Live-ISO.git"
+REPO_BRANCH="KDE"                           # Gig-OS 上游的构建分支,社区 fork 的改动已合并至此
 CORES="$(nproc)"
 
 # CPU 忙时延后：开跑前整机 CPU ≥ BUSY_PCT 就睡 DEFER_MIN 分钟再查，最多 MAX_DEFERS 次
@@ -35,7 +37,7 @@ MAX_DEFERS=12
 
 # R2 发布（默认值可被 config.env 覆盖）
 R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://r2.gentoozh.org}"    # 权威公开域（核对就看它）
-MIRROR_URL="${MIRROR_URL:-https://mirror.gentoozh.org/}"       # Worker 落地页（有缓存滞后）
+MIRROR_URL="${MIRROR_URL:-https://iso.gentoozh.org/}"       # Worker 落地页（有缓存滞后）
 R2_KEEP="${R2_KEEP:-3}"                                        # R2 上保留最近几份 ISO
 
 # 密钥 + 环境配置（R2_* / TG_* / 上面默认的覆盖）从 config.env 读
@@ -165,6 +167,16 @@ preflight_overlays() {
 
 # 可用内存够不够挂 tmpfs。tmpfs 是上限不是预留（按需占用、page cache 可回收），按真实工作集
 # （约上限 7 成）估需求，避免阈值不可达导致每锅编译前自我误杀。
+# 落磁盘构建时检查可用空间。实测峰值约 23G,要求 60G 留足余量(squashfs + ISO 另占)。
+preflight_disk() {
+    local avail need=60
+    avail=$(df -BG --output=avail "$(dirname "${TMPROOT}")" 2>/dev/null | tail -1 | tr -dc '0-9')
+    [ -n "${avail}" ] || avail=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+    log "预检：磁盘空间（落盘构建）…"
+    log "  可用 ${avail}G，需 ${need}G"
+    [ "${avail}" -ge "${need}" ] || { log "[错误] 磁盘空间不足：${avail}G < 需 ${need}G"; return 1; }
+}
+
 preflight_ram() {
     log "预检：内存能否装下 ${TMPFS_SIZE} tmpfs…"
     local want avail need
@@ -195,7 +207,11 @@ preflight() {
     log "===== 预检 ====="
     preflight_r2       || fail "预检失败：R2 未配置/不可达"
     preflight_overlays || fail "预检失败：calamares overlay / settings-gig fork 缺失"
-    preflight_ram      || fail "预检失败：内存不足以挂 ${TMPFS_SIZE} tmpfs"
+    if [ "${USE_TMPFS}" = 1 ]; then
+        preflight_ram  || fail "预检失败：内存不足以挂 ${TMPFS_SIZE} tmpfs"
+    else
+        preflight_disk || fail "预检失败：磁盘空间不足"
+    fi
     log "[OK] 预检全过"
 }
 
@@ -229,9 +245,15 @@ update_source() {
 prepare_workdir() {
     cleanup_mounts                                  # 防上次残留
     mkdir -p "${TMPROOT}"
-    log "挂载 ${TMPFS_SIZE} tmpfs 到 ${TMPROOT}（全内存构建）…"
-    mount -t tmpfs -o size="${TMPFS_SIZE}",mode=755 tmpfs "${TMPROOT}" || fail "tmpfs 挂载失败"
-    log "拷贝源码副本到内存…"
+    if [ "${USE_TMPFS}" = 1 ]; then
+        log "挂载 ${TMPFS_SIZE} tmpfs 到 ${TMPROOT}（全内存构建）…"
+        mount -t tmpfs -o size="${TMPFS_SIZE}",mode=755 tmpfs "${TMPROOT}" || fail "tmpfs 挂载失败"
+    else
+        # 因为落磁盘时上一锅的文件不会随 umount 消失，所以这里显式清空，避免残留混进本锅。
+        log "落磁盘构建，清空工作区 ${TMPROOT}…"
+        rm -rf "${TMPROOT:?}/"* 2>/dev/null || true
+    fi
+    log "拷贝源码副本到工作区…"
     cp -a "${SRC}" "${WORK}" || fail "拷贝失败"
 
     # host 专属参数经环境变量传给 build.sh（它的 config 用 := 默认值、env 可覆盖）。
@@ -264,13 +286,12 @@ EOF
     PKGDIR="${CACHE_BINPKG}" emaint binhost --fix >/dev/null 2>&1 || true
     log "已清 live/9999 binpkg 缓存 ${purged} 个并重建索引"
 
-    # 装出厂清理 hook（独立文件 hooks/99-sanitize-for-release.sh），+ exclude.txt 双层兜底排除调优文件。
-    install -m755 "${HOOK_SANITIZE}" "${WORK}/hooks/99-sanitize-for-release.sh" || fail "装出厂清理 hook 失败"
+    # 出厂清理用仓库里的 hooks/99-sanitize-for-release.sh(build.sh 会 source 整个 hooks/),不再从这里覆盖装陈旧副本;exclude.txt 兜底排除构建调优文件。
     local line
-    for line in 'etc/portage/make.conf/zz-buildhost' 'etc/portage/make.conf/zz-loadavg'; do
+    for line in 'etc/portage/make.conf/zz-buildhost'; do
         grep -qxF "${line}" "${WORK}/exclude.txt" 2>/dev/null || echo "${line}" >> "${WORK}/exclude.txt"
     done
-    log "已装出厂清理 hook + 补 exclude.txt 兜底"
+    log "已补 exclude.txt 兜底(出厂清理用仓库内 hook)"
 }
 
 # ===================== 3. 跑构建 =====================
@@ -394,7 +415,7 @@ publish_r2() {
 # ===================== 7. 收尾 =====================
 finish() {
     log "===== [OK] 全部完成：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）====="
-    notify OK "成功：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）已上线 R2 并通过对外核对（sha ${SHA:0:12}…）mirror.gentoozh.org${MIRROR_NOTE}；用时 $(fmt_dur)、$(date '+%F %T')"
+    notify OK "成功：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）已上线 R2 并通过对外核对（sha ${SHA:0:12}…）iso.gentoozh.org${MIRROR_NOTE}；用时 $(fmt_dur)、$(date '+%F %T')"
     DONE=1
     ls -1t "${LOG_DIR}"/build-*.log 2>/dev/null | tail -n +11 | xargs -r rm -f   # 只留最近 10 份日志
 }

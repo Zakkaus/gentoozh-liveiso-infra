@@ -1,5 +1,5 @@
 #!/bin/bash
-# 从 /opt/live-iso-builder/last-iso/ 把已验证 ISO 重传到 Cloudflare R2(不重编)。
+# 从 /opt/live-iso-builder/last-iso/ 把【已验证】ISO 重传到 Cloudflare R2(不重编)。
 # 用途:自动构建里 R2 上传那步失败(token 抖动/网络/CF 故障)时,ISO 已编好+验过+暂存,
 # R2 恢复后跑本脚本重传即可,不必再烧几小时重编。
 #
@@ -16,7 +16,7 @@ LOCK=/run/live-iso-build.lock
 
 R2_KEEP="${R2_KEEP:-3}"
 R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://r2.gentoozh.org}"
-MIRROR_URL="${MIRROR_URL:-https://mirror.gentoozh.org/}"
+MIRROR_URL="${MIRROR_URL:-https://iso.gentoozh.org/}"
 
 notify(){ [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_CHAT:-}" ] || return 0
   curl -fsS -m 20 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
@@ -100,6 +100,6 @@ _i=0; for f in "${_r2[@]}"; do _i=$((_i+1)); [ "$_i" -le "$R2_KEEP" ] && continu
 done
 
 DONE=1   # R2 上线 + 对外核对都过 = 真成功;放在收尾展示之前,免得展示用的 ls 瞬时抖动误触发 on_exit
-notify OK "重传成功并通过对外核对:$NAME(sha ${SHA:0:12}…)R2 + mirror.gentoozh.org"
+notify OK "重传成功并通过对外核对:$NAME(sha ${SHA:0:12}…)R2 + iso.gentoozh.org"
 echo "=== 完成,R2 现有 ==="
 rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r || true

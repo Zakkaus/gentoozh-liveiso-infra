@@ -40,12 +40,12 @@ echo "--- 0. Calamares 图形安装器本体(关键!没它 ISO 装不了机)---"
 ls "${R}"/usr/share/applications/*[Cc]alamares*.desktop >/dev/null 2>&1 && ok "calamares 桌面启动项在" || no "calamares .desktop 缺(桌面可能没图标,命令行仍可启)"
 
 echo
-echo "--- 0b. Calamares 版本锁定(必须 3.3.14-r8,fork 对齐的唯一好版本)---"
-# 旧门控只查 calamares 本体在不在,没查版本,上游滚动树升级会改 settings/shellprocess schema,
-# 与我们 fork 配置失配。查 vdb 实测产物版本。升级 calamares 时记得同步改这里的版本号。
+echo "--- 0b. Calamares 版本(走官方树 3.4 系列;3.5+ 被 package.mask 挡下)---"
+# 上游滚动树升级会改 settings/shellprocess schema。现走官方 3.4.x(见 package.mask/calamares)。
+# 查 vdb 实测产物版本必须是 3.4.x;要上 3.5 先真机验证 settings 兼容,再同步改这里和 package.mask。
 CALV="$(ls -1d "${R}"/var/db/pkg/app-admin/calamares-* 2>/dev/null | grep -v settings | xargs -r -n1 basename)"
-echo "${CALV}" | grep -qx 'calamares-3.3.14-r8' && ok "calamares 版本=3.3.14-r8(vdb 实测)" \
-    || bad "calamares 版本非 3.3.14-r8(vdb 实测=[${CALV:-缺}]),settings/shellprocess schema 可能失配"
+echo "${CALV}" | grep -qE '^calamares-3\.4\.' && ok "calamares 版本=${CALV}(3.4 系列,官方树)" \
+    || bad "calamares 版本非 3.4.x(vdb 实测=[${CALV:-缺}]),settings/shellprocess schema 可能失配"
 
 echo
 echo "--- 0c. shellprocess 装机清理契约(缺=安装后门,关键)---"
