@@ -90,7 +90,7 @@ cleanup_mounts() {
 }
 
 # 未到正常终点、又没被 fail 显式通知过的非零退出（运行期语法错 / 被 kill / set -u 撞未定义变量）
-# 都在这里补发 FAILED，避免静默白跑。flock 抢锁失败走 exit 0（那时本陷阱尚未安装、不会误报）。
+# 都在这里补发 FAILED，避免静默失败。flock 抢锁失败走 exit 0（此时陷阱尚未安装，不会误报）。
 on_exit() {
     local rc=$?
     if [ "${DONE}" != 1 ] && [ "${NOTIFIED}" != 1 ] && [ "${rc}" != 0 ]; then
