@@ -154,12 +154,12 @@ preflight_overlays() {
     eb=$(curl -fsS -m 20 "https://api.github.com/repos/Gig-OS/gig/contents/app-admin/calamares" 2>/dev/null \
          | grep -oE 'calamares-3\.3\.14-r[0-9]+\.ebuild' | head -1)
     [ -n "${eb}" ] && log "  [OK] gig overlay 含 ${eb}" || log "  [警告] 未能经 API 确认 calamares ebuild（限流？），不阻断"
-    git_reachable https://github.com/Gentoo-zh/calamares-settings-gig.git \
-        || { log "[错误] Gentoo-zh/calamares-settings-gig fork 连续 3 次不可达"; return 1; }
-    log "  [OK] settings-gig fork 可达"
+    git_reachable https://github.com/Gig-OS/calamares-settings-gig.git \
+        || { log "[错误] Gig-OS/calamares-settings-gig 连续 3 次不可达"; return 1; }
+    log "  [OK] settings-gig 仓库可达"
     # gentoo-zh / guru 提供 flclash 等非装机刚需包，不可达不阻断（只少装非关键包）。
     local ov
-    for ov in "gentoo-zh|https://github.com/microcai/gentoo-zh.git" "guru|https://github.com/gentoo-mirror/guru.git"; do
+    for ov in "gentoo-zh|https://github.com/gentoo-zh/overlay.git" "guru|https://github.com/gentoo-mirror/guru.git"; do
         git_reachable "${ov##*|}" || log "[警告] ${ov%%|*} overlay 暂不可达（非刚需，继续）"
     done
 }
