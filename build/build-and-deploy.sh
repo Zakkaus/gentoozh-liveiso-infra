@@ -286,6 +286,28 @@ EOF
     PKGDIR="${CACHE_BINPKG}" emaint binhost --fix >/dev/null 2>&1 || true
     log "已清 live/9999 binpkg 缓存 ${purged} 个并重建索引"
 
+    # 清除来自已移除 overlay 的 binpkg。缓存跨轮复用，某个 overlay 从 config 的 OVERLAYS
+    # 去掉之后，它编出来的包仍留在缓存里，--usepkg 可能把它装回去，而对应的仓库已经不在
+    # repos.conf 里。2026-08-07 移除 guru 时就留下一个 REPO: guru 的 zfsbootmenu。
+    # 允许的仓库取自本轮源码的 OVERLAYS 加 gentoo 与本地构建的 gig。
+    local allowed stale
+    allowed=$(sed -n '/^OVERLAYS=(/,/^)/p' "${WORK}/config" 2>/dev/null \
+              | sed -n 's/.*"\([a-z0-9-]*\)|.*/\1/p' | tr '\n' ' ')
+    allowed="gentoo ${allowed}"
+    if [ -s "${CACHE_BINPKG}/Packages" ]; then
+        stale=$(awk -v ok=" ${allowed} " '
+            /^CPV: /{cpv=$2} /^REPO: /{ if (index(ok, " " $2 " ")==0) print cpv }
+        ' "${CACHE_BINPKG}/Packages" | sort -u)
+        if [ -n "${stale}" ]; then
+            local cp
+            for cp in ${stale}; do
+                rm -rf "${CACHE_BINPKG}/${cp%-[0-9]*}" 2>/dev/null || true
+            done
+            PKGDIR="${CACHE_BINPKG}" emaint binhost --fix >/dev/null 2>&1 || true
+            log "已清来自已移除 overlay 的 binpkg：$(echo ${stale} | tr '\n' ' ')"
+        fi
+    fi
+
     # 出厂清理用仓库里的 hooks/99-sanitize-for-release.sh(build.sh 会 source 整个 hooks/),不再从这里覆盖装陈旧副本;exclude.txt 兜底排除构建调优文件。
     local line
     for line in 'etc/portage/make.conf/zz-buildhost'; do
