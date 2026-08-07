@@ -45,8 +45,8 @@ vim /opt/live-iso-builder/config.env
 chmod 600 /opt/live-iso-builder/config.env
 ```
 
-The fields are documented in `config.env.example`. The key named in `MIRROR_SSH_OPTS` has to be in
-in Cloudflare, granting Object Read & Write scoped to that bucket.
+The fields are documented in `config.env.example`. The private key named in `MIRROR_SSH_OPTS` has to
+be in `zakk`'s `authorized_keys` on the mirror host.
 
 ## What a run does
 

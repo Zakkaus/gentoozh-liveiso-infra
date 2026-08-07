@@ -110,7 +110,7 @@ grep -q 'zh_CN\|zh_TW' "${R}/etc/locale.gen" 2>/dev/null && ok "locale.gen 含 z
 # 光查配置不够:glibc 从源码 -compile-locales 时，若 locale-gen 在坏 chroot locale 下 abort
 # (日志见 "locale-gen: Aborting because not all of the selected locales were compiled"),
 # zh_CN/zh_TW 可能没真编进 /usr/lib/locale/locale-archive,中文会回退 C。实测 locale -a。
-# (本锅因 glibc 二进制包自带完整 archive 而无碍；此闸防将来 glibc 源码重编时真缺。)
+# (本轮因 glibc 二进制包自带完整 archive 而无碍；此闸防将来 glibc 源码重编时真缺。)
 _la="$(chroot "${R}" /usr/bin/locale -a 2>/dev/null)"
 if [ -z "${_la}" ]; then
     no "squashfs 内 locale -a 跑不了(跳过已编译 locale 实测，仅查了配置)"

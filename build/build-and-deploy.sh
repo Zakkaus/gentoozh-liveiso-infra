@@ -138,7 +138,7 @@ wait_for_idle_cpu() {
 }
 
 # 预检（开跑前几秒查清硬性前置，失败即 fail，不白烧几小时）
-# git 仓库可达性，3 次退避重试（瞬时 TLS/DNS/5xx 抖动不该毙整锅）。
+# git 仓库可达性，3 次退避重试（瞬时 TLS/DNS/5xx 抖动不该毙掉整轮）。
 git_reachable() {
     local n=0
     until git ls-remote --exit-code "$@" >/dev/null 2>&1; do
@@ -169,7 +169,7 @@ preflight_overlays() {
 }
 
 # 可用内存够不够挂 tmpfs。tmpfs 是上限不是预留（按需占用、page cache 可回收），按真实工作集
-# （约上限 7 成）估需求，避免阈值不可达导致每锅编译前自我误杀。
+# （约上限 7 成）估需求，避免阈值不可达导致每轮编译前自我误杀。
 # 落磁盘构建时检查可用空间。实测峰值约 23G,要求 60G 留足余量(squashfs + ISO 另占)。
 preflight_disk() {
     local avail need=60
@@ -232,12 +232,12 @@ update_source() {
         timeout 600 git clone --recurse-submodules --branch "${REPO_BRANCH}" "${REPO_URL}" "${SRC}" 2>&1 | tee -a "${LOG}" || fail "clone 失败/超时"
     fi
     GIT_COMMIT="$(git -C "${SRC}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    log "本锅源码：${REPO_BRANCH}@${GIT_COMMIT}"
-    # 源码新鲜度提醒：本地 != 远端（fetch 可能失败、用了旧副本）只 WARN，不毙整锅
+    log "本轮源码：${REPO_BRANCH}@${GIT_COMMIT}"
+    # 源码新鲜度提醒：本地 != 远端（fetch 可能失败、用了旧副本）只 WARN，不毙掉整轮
     local remote_head
     remote_head="$(git -C "${SRC}" rev-parse --short "origin/${REPO_BRANCH}" 2>/dev/null || echo '')"
     [ -n "${remote_head}" ] && [ "${GIT_COMMIT}" != "${remote_head}" ] \
-        && notify WARN "源码非最新：本锅 ${GIT_COMMIT} != origin ${remote_head}（fetch 可能失败、用了旧副本）"
+        && notify WARN "源码非最新：本轮 ${GIT_COMMIT} != origin ${remote_head}（fetch 可能失败、用了旧副本）"
 }
 
 # 2. 准备工作区
@@ -249,7 +249,7 @@ prepare_workdir() {
         log "挂载 ${TMPFS_SIZE} tmpfs 到 ${TMPROOT}（全内存构建）…"
         mount -t tmpfs -o size="${TMPFS_SIZE}",mode=755 tmpfs "${TMPROOT}" || fail "tmpfs 挂载失败"
     else
-        # 因为落磁盘时上一锅的文件不会随 umount 消失，所以这里显式清空，避免残留混进本锅。
+        # 因为落磁盘时上一轮的文件不会随 umount 消失，所以这里显式清空，避免残留混进本轮。
         log "落磁盘构建，清空工作区 ${TMPROOT}…"
         rm -rf "${TMPROOT:?}/"* 2>/dev/null || true
     fi
@@ -346,7 +346,7 @@ verify_iso() {
         fi
     else
         log "[警告] 未找到 verify-iso.sh，跳过内容门控"
-        notify WARN "未找到 verify-iso.sh，本锅跳过内容门控，请确认部署"
+        notify WARN "未找到 verify-iso.sh，本轮跳过内容门控，请确认部署"
     fi
 
     log "计算校验和…"
@@ -400,7 +400,7 @@ publish_site() {
         fi
     done
 
-    # 对外核对：公开域名服务的就是本锅。不一致时留在原地由下一锅覆盖，不删。
+    # 对外核对：公开域名服务的就是本轮。不一致时留在原地由下一轮覆盖，不删。
     # 一并读状态码：404 的错误页也带 content-length，只比长度会把它当成一个尺寸。
     local loc code pub head
     loc=$(stat -c%s "${STAGE}/${ISO_NAME}" 2>/dev/null)
@@ -414,7 +414,7 @@ publish_site() {
     fi
     log "[OK] 镜像站已发布且对外核对一致：${MIRROR_PUBLIC_BASE}/${ISO_NAME}（${loc} bytes）"
 
-    # 保留最近 MIRROR_KEEP 份，本锅永不删。
+    # 保留最近 MIRROR_KEEP 份，本轮永不删。
     local keep_i=0 old
     while read -r old; do
         keep_i=$((keep_i+1))
@@ -428,7 +428,7 @@ publish_site() {
              | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
 }
 
-# 7. 落地页是 Worker 读镜像站列表的视图，有边缘缓存滞后，因此只探测不拦下整锅，
+# 7. 落地页是 Worker 读镜像站列表的视图，有边缘缓存滞后，因此只探测不拦下整轮，
 # 状态并进末尾的成功通知。
 check_landing() {
     local i found=0
@@ -457,7 +457,7 @@ finish() {
 main() {
     (( EUID == 0 )) || { echo "需以 root 运行"; exit 1; }
     acquire_lock
-    rm -f "${SELFNOTIFIED}" 2>/dev/null || true     # 清上锅遗留的自通知哨兵
+    rm -f "${SELFNOTIFIED}" 2>/dev/null || true     # 清上一轮遗留的自通知哨兵
     # 信号杀时显式退非零，否则 EXIT 陷阱里 $? 读成 0 → on_exit 误判成功、漏发 FAILED
     trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
     trap on_exit EXIT

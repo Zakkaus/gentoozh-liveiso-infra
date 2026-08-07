@@ -58,7 +58,7 @@ ST_EPOCH=$(date -d "${d:0:4}-${d:4:2}-${d:6:2} ${t:0:2}:${t:2:2}:${t:4:2}" +%s 2
 if [ "$ST_EPOCH" != 0 ]; then
   AGE_DAYS=$(( ( $(date +%s) - ST_EPOCH ) / 86400 ))
   if [ "$AGE_DAYS" -gt 14 ] && [ "${1:-}" != "--force" ] && [ "${CONFIRM:-}" != 1 ]; then
-    echo "[警告] 这锅 stamp=$STAMP 已 ${AGE_DAYS} 天，疑似陈旧。确认要重传请:CONFIRM=1 $0  或  $0 --force"
+    echo "[警告] 这一轮 stamp=$STAMP 已 ${AGE_DAYS} 天，疑似陈旧。确认要重传请:CONFIRM=1 $0  或  $0 --force"
     notify WARN "重传被陈旧闸拦下：$NAME stamp=$STAMP(${AGE_DAYS}天),需 --force"; NOTIFIED=1; exit 1
   fi
 fi
