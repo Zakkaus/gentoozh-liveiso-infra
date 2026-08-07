@@ -2,12 +2,9 @@
 Description=每周触发一次 Live ISO 自动构建
 
 [Timer]
-# 每周二 06:00（UTC+8 / 北京时间）触发，即 UTC 周一 22:00。有 binpkg+distfiles
-# 缓存后增量构建很快，故为周更。这台机器同时执行 binhost 的两轮构建，稳定频道
-# 08:13 UTC 起约一小时四十五分、测试频道 20:05 UTC 起约一个半小时，因为周一
-# 22:00 UTC 到次日 08:13 UTC 是全天最长的一段空窗，所以排在这里。
+# 有 binpkg 与 distfiles 缓存后增量构建很快，故为周更。触发点即 UTC 周一 22:00,
+# 因为到本机 binhost 稳定频道 08:13 UTC 开始构建之间是全天最长的空窗。
 OnCalendar=Tue *-*-* 06:00:00 Asia/Shanghai
-# 错过触发时间时开机后补执行一次
 Persistent=true
 RandomizedDelaySec=600
 
