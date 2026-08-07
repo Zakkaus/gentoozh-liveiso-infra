@@ -4,7 +4,6 @@
 
 set -uo pipefail
 
-SELF_DIR="$(dirname "$(readlink -f "$0")")"
 PERSIST="/opt/live-iso-builder"
 SRC="${PERSIST}/Live-ISO"
 STAGE="${PERSIST}/last-iso"                 # 验证通过的 ISO 暂存，上传失败可重传
@@ -39,7 +38,7 @@ MIRROR_KEEP="${MIRROR_KEEP:-2}"                                # 镜像站保留
 MIRROR_PUBLIC_BASE="${MIRROR_PUBLIC_BASE:-https://distfiles.gentoozh.org/gigos}"  # 末尾不带斜杠
 
 # MIRROR_* / TG_* 等密钥与默认值覆盖从 config.env 读，不入库。
-CONFIG_ENV="${PERSIST}/config.env"
+export CONFIG_ENV="${PERSIST}/config.env"   # verify-iso.sh 作为子进程读它
 [ -f "${CONFIG_ENV}" ] || { echo "缺 ${CONFIG_ENV}（从 config.env.example 复制并填）"; exit 1; }
 . "${CONFIG_ENV}"
 
@@ -128,12 +127,12 @@ wait_for_idle_cpu() {
     log "延后达上限（CPU 仍 $(cpu_busy_pct)%），照常开始构建。"
 }
 
-# 3 次重试：瞬时 TLS/DNS/5xx 抖动不应中止这次构建。
+# 3 次重试，间隔 10、20 秒退避：瞬时 TLS/DNS/5xx 抖动不应中止这次构建。
 git_reachable() {
-    local n=0
+    local n=0 wait=10
     until git ls-remote --exit-code "$@" >/dev/null 2>&1; do
         n=$((n+1)); [ "${n}" -ge 3 ] && return 1
-        sleep 10
+        sleep "${wait}"; wait=$((wait*2))
     done
 }
 
@@ -377,11 +376,10 @@ publish_site() {
     # 核对公开域名服务的确实是本次产物。必须一并判 HTTP 状态码，因为 404 错误页也带 content-length。
     local loc code pub head
     loc=$(stat -c%s "${STAGE}/${ISO_NAME}" 2>/dev/null)
-    head=$(curl -sSL -H 'Cache-Control: no-cache' -o /dev/null \
-           -w '%{http_code} %{size_upload}' -I "${MIRROR_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null)
-    code=${head%% *}
-    pub=$(curl -sSL -H 'Cache-Control: no-cache' -I "${MIRROR_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null \
-          | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
+    # 一次请求同时取状态码与长度。分两次发时，两者可能来自不同响应。
+    head=$(curl -sSL -H 'Cache-Control: no-cache' -w '\n%{http_code}' -I "${MIRROR_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null)
+    code=$(printf '%s\n' "${head}" | tail -1)
+    pub=$(printf '%s\n' "${head}" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
     if [ "${code:-}" != 200 ] || [ -z "${loc:-}" ] || [ "${pub:-0}" != "${loc}" ]; then
         fail "镜像站对外核对失败：HTTP ${code:-空}，content-length=${pub:-空} != 本地 ${loc:-空}"
     fi
