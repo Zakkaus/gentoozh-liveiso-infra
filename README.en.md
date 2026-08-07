@@ -4,7 +4,7 @@
 
 Build and release automation for the Gentoo-zh Community Live ISO. It produces a KDE Plasma desktop
 Live ISO (`gig-os-YYYYMMDD.iso`), built weekly by a systemd timer on the build host and uploaded to
-Cloudflare R2 once it passes verification.
+the mirror at `distfiles.gentoozh.org/gigos/` once it passes verification.
 
 This repository only orchestrates. The build itself lives on the `KDE` branch of
 [Gig-OS/Live-ISO](https://github.com/Gig-OS/Live-ISO), including the concurrency lock, the overlay,
@@ -33,7 +33,8 @@ Steps:
 3. After changing a unit, run `systemctl daemon-reload`. Enable the timer with
    `systemctl enable --now live-iso-build.timer`; `live-iso-notify-fail.service` is started by
    `OnFailure=` and does not need enabling.
-4. Fill in `config.env` and install `rclone`. Missing R2 fields stop the preflight immediately
+4. Fill in `config.env` and give root a key that can write to `/srv/pub/gigos` on the mirror. An
+   unwritable target stops the preflight immediately
    rather than after hours of compilation.
 
 ## config.env
@@ -44,7 +45,7 @@ vim /opt/live-iso-builder/config.env
 chmod 600 /opt/live-iso-builder/config.env
 ```
 
-The fields are documented in `config.env.example`. Create the R2 token under R2 → Manage API Tokens
+The fields are documented in `config.env.example`. The key named in `MIRROR_SSH_OPTS` has to be in
 in Cloudflare, granting Object Read & Write scoped to that bucket.
 
 ## What a run does
@@ -52,16 +53,19 @@ in Cloudflare, granting Object Read & Write scoped to that bucket.
 `live-iso-build.timer` fires `build-and-deploy.sh` every Monday at 04:00 Asia/Shanghai:
 
 1. Fetch the `KDE` branch of `Gig-OS/Live-ISO` and record the commit.
-2. Preflight: the repository, the overlay and the R2 bucket must all be reachable. Stop if not.
+2. Preflight: the repository, the overlay and the mirror's upload directory must all be reachable.
+   Stop if not.
 3. Build. **Disk-backed by default**; set `USE_TMPFS=1` to build in RAM instead. This is a shared
    machine and other people's compiles need the memory too. The binpkg and distfiles caches live on
    SSD and are reused across runs.
 4. `verify-iso.sh` mounts the squashfs and checks the things that must be present: calamares, the
    install-time cleanup, grub, the graphics drivers, and the absence of leaked credentials. A
    failure blocks the release.
-5. `rclone` uploads to R2, keeping the most recent `R2_KEEP` builds.
-6. Reconciliation: fetch the new file from the public R2 domain and compare `content-length`, then
-   check that the landing page lists it.
+5. Upload to `distfiles.gentoozh.org/gigos/`, keeping the most recent `MIRROR_KEEP` builds and
+   checking the public status code and `content-length`. `r2.gentoozh.org` redirects here, so this
+   is the only public path and a failure fails the run. Skipped when `MIRROR_SSH_TARGET` is unset.
+6. Check that the landing page lists the build. The page is a Worker view over the mirror's
+   directory listing, it lags behind the edge cache and is not authoritative.
 
 `reupload-iso.sh` retries a failed upload without rebuilding. It trusts `BUILD_MANIFEST` and refuses
 to upload when the checksum does not match.

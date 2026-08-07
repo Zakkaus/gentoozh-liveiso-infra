@@ -2,7 +2,7 @@
 
 [简体中文](README.md) · [正體中文](README.zh-TW.md) · [English](README.en.md)
 
-Gentoo 中文社群 Live ISO 的自動建置與發布腳本。產物是 KDE Plasma 桌面 Live ISO（`gig-os-YYYYMMDD.iso`），由建置機上的 systemd timer 每週編一次，驗證通過後傳到 Cloudflare R2。
+Gentoo 中文社群 Live ISO 的自動建置與發布腳本。產物是 KDE Plasma 桌面 Live ISO（`gig-os-YYYYMMDD.iso`），由建置機上的 systemd timer 每週編一次，驗證通過後傳到鏡像站 `distfiles.gentoozh.org/gigos/`。
 
 本倉庫只做編排。建置本身在 [Gig-OS/Live-ISO](https://github.com/Gig-OS/Live-ISO) 的 `KDE` 分支，包括防併發鎖、overlay、`@world` 與出廠內容。
 
@@ -23,7 +23,7 @@ Gentoo 中文社群 Live ISO 的自動建置與發布腳本。產物是 KDE Plas
 1. 確認沒有建置在執行：`systemctl is-active live-iso-build.service`。建置期間覆蓋腳本會讓執行中的行程讀到半截程式碼，整鍋作廢。
 2. 同步腳本，`chmod +x /opt/live-iso-builder/*.sh`。
 3. 改過 unit 要 `systemctl daemon-reload`。timer 用 `systemctl enable --now live-iso-build.timer`；`live-iso-notify-fail.service` 由 `OnFailure=` 拉起，不必 enable。
-4. 填 `config.env`，安裝 `rclone`。R2 欄位缺失時預檢直接停，不會先編幾小時。
+4. 填 `config.env`，並讓 root 有一把能寫鏡像機 `/srv/pub/gigos` 的私鑰。目標不可寫時預檢直接停，不會先編幾小時。
 
 ## config.env
 
@@ -33,20 +33,20 @@ vim /opt/live-iso-builder/config.env
 chmod 600 /opt/live-iso-builder/config.env
 ```
 
-欄位說明見 `config.env.example`。R2 token 在 Cloudflare 的 R2 → Manage API Tokens 建立，授予 Object Read & Write 並限定到該 bucket。
+欄位說明見 `config.env.example`。`MIRROR_SSH_OPTS` 指向的私鑰要在鏡像機 `zakk` 的 `authorized_keys` 裡。
 
 ## 流程
 
 `live-iso-build.timer` 每週一 04:00（Asia/Shanghai）觸發 `build-and-deploy.sh`：
 
 1. 拉取 `Gig-OS/Live-ISO` 的 `KDE` 分支，記下 commit。
-2. 預檢：倉庫可達、overlay 可達、R2 可列。缺料即停。
+2. 預檢：倉庫可達、overlay 可達、鏡像站落地目錄可寫。缺料即停。
 3. 建置。**預設落磁碟**；`USE_TMPFS=1` 才掛 tmpfs 在記憶體裡編。這是共享機，其他人的編譯同樣需要記憶體。binpkg 與 distfiles 快取落 SSD 跨鍋重用。
 4. `verify-iso.sh` 掛載 squashfs 抽查關鍵項：calamares、安裝清理、grub、顯示卡驅動、有無混入金鑰。不通過即攔下。
-5. `rclone` 上傳到 R2，按 `R2_KEEP` 保留最近幾版。
-6. 核對：從 R2 公開網域取回本鍋檔案對帳 content-length，再看下載頁是否已列出。
+5. 上傳到鏡像站 `distfiles.gentoozh.org/gigos/`，按 `MIRROR_KEEP` 保留最近幾版，以對外狀態碼與 content-length 核對。`r2.gentoozh.org` 已 301 到這裡，這是唯一的公開路徑，失敗即失敗。未配 `MIRROR_SSH_TARGET` 時整段跳過。
+6. 看下載頁是否已列出本鍋。下載頁是 Worker 讀鏡像站目錄清單的檢視，有快取延遲，不作權威。
 
-`reupload-iso.sh` 用於 R2 上傳失敗後手動重傳，不重編，以 `BUILD_MANIFEST` 為準，校驗和不符即拒絕。
+`reupload-iso.sh` 用於上傳失敗後手動重傳，不重編，以 `BUILD_MANIFEST` 為準，校驗和不符即拒絕。
 
 ## 通知
 

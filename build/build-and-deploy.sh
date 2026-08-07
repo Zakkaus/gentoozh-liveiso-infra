@@ -1,13 +1,13 @@
 #!/bin/bash
-# Gentoo 中文社区 Live ISO 自动构建 + Cloudflare R2 发布
+# Gentoo 中文社区 Live ISO 自动构建 + 镜像站发布
 #
-# 拉源码、执行 build.sh、验证、发布 R2、通知 Telegram。只做编排，构建本身在 Live-ISO 的 build.sh。
+# 拉源码、执行 build.sh、验证、发布到镜像站、通知 Telegram。只做编排，构建本身在 Live-ISO 的 build.sh。
 # 由 systemd timer 触发，需 root。
 
 set -uo pipefail
 
 # 配置
-# 路径与调优写这里；密钥（R2 token / Telegram）从 config.env 读、不入库。
+# 路径与调优写这里；密钥（Telegram token）从 config.env 读、不入库。
 SELF_DIR="$(dirname "$(readlink -f "$0")")"
 PERSIST="/opt/live-iso-builder"             # 持久目录：脚本 + 源码副本 + 缓存 + 日志
 SRC="${PERSIST}/Live-ISO"                   # 构建源仓库（持久，git 更新）
@@ -34,19 +34,16 @@ BUSY_PCT=40
 DEFER_MIN=30
 MAX_DEFERS=12
 
-# R2 发布（默认值可被 config.env 覆盖）
-R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://r2.gentoozh.org}"    # 权威公开域（核对就看它）
 MIRROR_URL="${MIRROR_URL:-https://iso.gentoozh.org/}"       # Worker 落地页（有缓存滞后）
-R2_KEEP="${R2_KEEP:-3}"                                        # R2 上保留最近几份 ISO
 
-# 镜像站发布（distfiles.gentoozh.org，最终取代 R2；未配 MIRROR_SSH_TARGET 时整段跳过）
+# 镜像站发布（唯一发布目标；未配 MIRROR_SSH_TARGET 时整段跳过）
 MIRROR_SSH_TARGET="${MIRROR_SSH_TARGET:-}"                     # 如 zakk@159.195.212.91
 MIRROR_SSH_OPTS="${MIRROR_SSH_OPTS:-}"                         # 如 -i /root/.ssh/gigos_mirror -p 60001
 MIRROR_PATH="${MIRROR_PATH:-/srv/pub/gigos}"                   # 镜像机上的落地目录
 MIRROR_KEEP="${MIRROR_KEEP:-2}"                                # 镜像站保留最近几份 ISO
 MIRROR_PUBLIC_BASE="${MIRROR_PUBLIC_BASE:-https://distfiles.gentoozh.org/gigos}"  # 末尾不带斜杠
 
-# 密钥 + 环境配置（R2_* / TG_* / 上面默认的覆盖）从 config.env 读
+# 密钥 + 环境配置（MIRROR_* / TG_* / 上面默认的覆盖）从 config.env 读
 CONFIG_ENV="${PERSIST}/config.env"
 [ -f "${CONFIG_ENV}" ] || { echo "缺 ${CONFIG_ENV}（从 config.env.example 复制并填）"; exit 1; }
 . "${CONFIG_ENV}"
@@ -193,25 +190,22 @@ preflight_ram() {
     [ "${avail}" -ge "${need}" ] || { log "[错误] 可用内存不足：${avail}G < 需 ${need}G"; return 1; }
 }
 
-# R2 是唯一发布目标：配置齐全 + bucket 可列。顺带导出 rclone 环境（后面上传复用）。
-preflight_r2() {
-    log "预检：R2 配置 + 可达…"
-    [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ENDPOINT:-}" ] \
-        || { log "[错误] config.env 缺 R2_*"; return 1; }
-    command -v rclone >/dev/null 2>&1 || { log "[错误] 构建机缺 rclone"; return 1; }
-    export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare RCLONE_CONFIG_R2_REGION=auto
-    export RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT}"
+# 镜像站是唯一发布目标：目标可 ssh、落地目录可写。缺料就别白编几小时。
+preflight_mirror() {
+    [ -n "${MIRROR_SSH_TARGET}" ] || { log "预检：未配 MIRROR_SSH_TARGET，跳过镜像站检查"; return 0; }
+    log "预检：镜像站可达…"
+    local ssh_cmd="ssh ${MIRROR_SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15"
     local n=0
-    until rclone lsf "R2:${R2_BUCKET}/" >/dev/null 2>&1; do
-        n=$((n+1)); [ "${n}" -ge 3 ] && { log "[错误] R2 bucket ${R2_BUCKET} 连续 3 次列取失败"; return 1; }
+    until ${ssh_cmd} "${MIRROR_SSH_TARGET}" "test -w ${MIRROR_PATH}" >/dev/null 2>&1; do
+        n=$((n+1)); [ "${n}" -ge 3 ] && { log "[错误] ${MIRROR_SSH_TARGET}:${MIRROR_PATH} 连续 3 次不可写"; return 1; }
         sleep 10
     done
-    log "  [OK] R2 可达：bucket ${R2_BUCKET}"
+    log "  [OK] 镜像站可达：${MIRROR_SSH_TARGET}:${MIRROR_PATH}"
 }
 
 preflight() {
     log "===== 预检 ====="
-    preflight_r2       || fail "预检失败：R2 未配置/不可达"
+    preflight_mirror   || fail "预检失败：镜像站不可达或落地目录不可写"
     preflight_overlays || fail "预检失败：calamares overlay / settings-gig fork 缺失"
     if [ "${USE_TMPFS}" = 1 ]; then
         preflight_ram  || fail "预检失败：内存不足以挂 ${TMPFS_SIZE} tmpfs"
@@ -365,59 +359,7 @@ EOF
     log "[OK] ISO 已暂存 + 写 manifest：sha=${SHA:0:12}…（上传失败也不会丢）"
 }
 
-# 6b. 发布到 R2。公开域名已 301 到镜像站，R2 现在只作为一份异地备份。
-publish_r2() {
-    log "R2：上传 ${ISO_NAME} 到 bucket ${R2_BUCKET}…"
-    if ! rclone copyto "${STAGE}/${ISO_NAME}" "R2:${R2_BUCKET}/${ISO_NAME}" \
-            --s3-no-check-bucket --s3-chunk-size 64M --retries 5 2>>"${LOG}"; then
-        log "[警告] R2 上传失败，但 ISO 已验证+暂存：${STAGE}/${ISO_NAME}"
-        notify FAILED "R2 上传失败但 ISO 已暂存：${ISO_NAME}；恢复后执行 reupload-iso.sh（勿重编）；用时 $(fmt_dur)、$(date '+%F %T')"
-        NOTIFIED=1; cleanup_mounts; exit 1
-    fi
-    local e
-    for e in sha256 md5; do
-        [ -f "${STAGE}/${ISO_NAME}.${e}" ] \
-            && rclone copyto "${STAGE}/${ISO_NAME}.${e}" "R2:${R2_BUCKET}/${ISO_NAME}.${e}" --s3-no-check-bucket --retries 5 2>>"${LOG}"
-    done
-
-    # 直接问 bucket：公开域名已 301 到镜像站，跟随跳转量到的是镜像站那一份。
-    local loc obj
-    loc=$(stat -c%s "${STAGE}/${ISO_NAME}" 2>/dev/null)
-    obj=$(rclone size --json "R2:${R2_BUCKET}/${ISO_NAME}" 2>>"${LOG}" \
-          | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')
-    [ -n "${loc:-}" ] && [ "${obj:-0}" = "${loc}" ] \
-        || fail "R2 核对失败：bucket 内 ${obj:-空} != 本地 ${loc:-空}"
-
-    # 核对 2（非权威）：落地页（Worker 读 R2）是否已列出本锅。落地页只是 R2 的便利列表视图，
-    # R2 本体已由核对 1 验证；Worker 边缘缓存有滞后属正常、稍后自动刷新。故只探测、不单独发 WARN
-    # （那是假警报），把状态并进末尾成功通知。
-    local i found=0
-    for i in 1 2 3 4 5 6; do
-        curl -fsSL -H 'Cache-Control: no-cache' "${MIRROR_URL}?_=$(date +%s)-${i}" 2>/dev/null | grep -qF "${ISO_NAME}" \
-            && { found=1; break; }
-        [ "${i}" -lt 6 ] && sleep 20
-    done
-    if [ "${found}" = 1 ]; then
-        log "[OK] mirror 落地页已反映新镜像"
-    else
-        log "mirror 落地页暂未反映（R2 已上线、核对一致；Worker 缓存稍后自动刷新）"
-        MIRROR_NOTE="（落地页稍后自动刷新）"
-    fi
-
-    # 保留最近 R2_KEEP 份（gig-os-YYYYMMDD.iso），删更旧的；本锅永不删。
-    local f keep_i=0
-    while read -r f; do
-        keep_i=$((keep_i+1))
-        [ "${keep_i}" -le "${R2_KEEP}" ] && continue
-        [ "${f}" = "${ISO_NAME}" ] && continue
-        log "R2 删旧：${f}"
-        rclone deletefile "R2:${R2_BUCKET}/${f}" 2>>"${LOG}" || true
-        rclone deletefile "R2:${R2_BUCKET}/${f}.sha256" 2>>"${LOG}" || true
-        rclone deletefile "R2:${R2_BUCKET}/${f}.md5" 2>>"${LOG}" || true
-    done < <(rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
-}
-
-# 6a. 发布到镜像站。r2.gentoozh.org 已 301 到这里，因此这是唯一的公开路径，失败即失败。
+# 6. 发布到镜像站。r2.gentoozh.org 已 301 到这里，这是唯一的公开路径，失败即失败。
 publish_site() {
     if [ -z "${MIRROR_SSH_TARGET}" ]; then
         log "镜像站：未配置 MIRROR_SSH_TARGET，跳过"
@@ -464,10 +406,27 @@ publish_site() {
              | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
 }
 
-# 7. 收尾
+# 7. 落地页是 Worker 读镜像站列表的视图，有边缘缓存滞后，因此只探测不拦下整锅，
+# 状态并进末尾的成功通知。
+check_landing() {
+    local i found=0
+    for i in 1 2 3 4 5 6; do
+        curl -fsSL -H 'Cache-Control: no-cache' "${MIRROR_URL}?_=$(date +%s)-${i}" 2>/dev/null | grep -qF "${ISO_NAME}" \
+            && { found=1; break; }
+        [ "${i}" -lt 6 ] && sleep 20
+    done
+    if [ "${found}" = 1 ]; then
+        log "[OK] 落地页已反映新镜像"
+    else
+        log "落地页暂未反映（镜像站已上线、核对一致；Worker 缓存稍后自动刷新）"
+        MIRROR_NOTE="（落地页稍后自动刷新）"
+    fi
+}
+
+# 8. 收尾
 finish() {
     log "===== [OK] 全部完成：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）====="
-    notify OK "成功：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）已上线 ${MIRROR_PUBLIC_BASE} 并通过对外核对，R2 备份完成（sha ${SHA:0:12}…）iso.gentoozh.org${MIRROR_NOTE}；用时 $(fmt_dur)、$(date '+%F %T')"
+    notify OK "成功：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）已上线 ${MIRROR_PUBLIC_BASE} 并通过对外核对（sha ${SHA:0:12}…）iso.gentoozh.org${MIRROR_NOTE}；用时 $(fmt_dur)、$(date '+%F %T')"
     DONE=1
     ls -1t "${LOG_DIR}"/build-*.log 2>/dev/null | tail -n +11 | xargs -r rm -f   # 只留最近 10 份日志
 }
@@ -493,7 +452,7 @@ main() {
     verify_iso
     stage_iso
     publish_site
-    publish_r2
+    check_landing
     finish
 }
 
