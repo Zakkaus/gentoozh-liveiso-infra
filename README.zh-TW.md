@@ -20,7 +20,7 @@ Gentoo 中文社群 Live ISO 的自動建置與發布腳本。產物是 KDE Plas
 
 步驟：
 
-1. 確認沒有建置在執行：`systemctl is-active live-iso-build.service`。建置期間覆蓋腳本會讓執行中的行程讀到半截程式碼，整鍋作廢。
+1. 確認沒有建置在執行：`systemctl is-active live-iso-build.service`。建置期間覆蓋腳本會讓執行中的行程讀到半截程式碼，整輪作廢。
 2. 同步腳本，`chmod +x /opt/live-iso-builder/*.sh`。
 3. 改過 unit 要 `systemctl daemon-reload`。timer 用 `systemctl enable --now live-iso-build.timer`；`live-iso-notify-fail.service` 由 `OnFailure=` 拉起，不必 enable。
 4. 填 `config.env`，並讓 root 有一把能寫鏡像機 `/srv/pub/gigos` 的私鑰。目標不可寫時預檢直接停，不會先編幾小時。
@@ -41,10 +41,10 @@ chmod 600 /opt/live-iso-builder/config.env
 
 1. 拉取 `Gig-OS/Live-ISO` 的 `KDE` 分支，記下 commit。
 2. 預檢：倉庫可達、overlay 可達、鏡像站落地目錄可寫。缺料即停。
-3. 建置。**預設落磁碟**；`USE_TMPFS=1` 才掛 tmpfs 在記憶體裡編。這是共享機，其他人的編譯同樣需要記憶體。binpkg 與 distfiles 快取落 SSD 跨鍋重用。
+3. 建置。**預設落磁碟**；`USE_TMPFS=1` 才掛 tmpfs 在記憶體裡編。這是共享機，其他人的編譯同樣需要記憶體。binpkg 與 distfiles 快取落 SSD 跨輪重用。
 4. `verify-iso.sh` 掛載 squashfs 抽查關鍵項：calamares、安裝清理、grub、顯示卡驅動、有無混入金鑰。不通過即攔下。
 5. 上傳到鏡像站 `distfiles.gentoozh.org/gigos/`，按 `MIRROR_KEEP` 保留最近幾版，以對外狀態碼與 content-length 核對。`r2.gentoozh.org` 已 301 到這裡，這是唯一的公開路徑，失敗即失敗。未配 `MIRROR_SSH_TARGET` 時整段跳過。
-6. 看下載頁是否已列出本鍋。下載頁是 Worker 讀鏡像站目錄清單的檢視，有快取延遲，不作權威。
+6. 看下載頁是否已列出本輪產物。下載頁是 Worker 讀鏡像站目錄清單的檢視，有快取延遲，不作權威。
 
 `reupload-iso.sh` 用於上傳失敗後手動重傳，不重編，以 `BUILD_MANIFEST` 為準，校驗和不符即拒絕。
 
