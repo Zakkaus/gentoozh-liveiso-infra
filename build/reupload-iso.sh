@@ -1,7 +1,7 @@
 #!/bin/bash
-# 从 /opt/live-iso-builder/last-iso/ 把【已验证】ISO 重传到 Cloudflare R2(不重编)。
-# 用途：自动构建里 R2 上传那步失败(token 抖动/网络/CF 故障)时,ISO 已编好+验过+暂存，
-# R2 恢复后跑本脚本重传即可，不必再烧几小时重编。
+# 从 /opt/live-iso-builder/last-iso/ 把【已验证】ISO 重传到镜像站(不重编)。
+# 用途：自动构建里上传那步失败(网络/镜像机故障)时,ISO 已编好+验过+暂存，
+# 镜像站恢复后跑本脚本重传即可，不必再烧几小时重编。
 #
 # 以 last-iso/BUILD_MANIFEST 为唯一权威身份(构建脚本 stage 成功时原子写入):
 #   无 manifest / 实盘 sha 与 manifest 不符 / RUN_STAMP 陈旧  → 拒绝盲传。
@@ -14,8 +14,11 @@ STAGE=/opt/live-iso-builder/last-iso
 LOCK=/run/live-iso-build.lock
 . /opt/live-iso-builder/config.env || { echo "missing config.env"; exit 1; }
 
-R2_KEEP="${R2_KEEP:-3}"
-R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://r2.gentoozh.org}"
+MIRROR_SSH_TARGET="${MIRROR_SSH_TARGET:-}"
+MIRROR_SSH_OPTS="${MIRROR_SSH_OPTS:-}"
+MIRROR_PATH="${MIRROR_PATH:-/srv/pub/gigos}"
+MIRROR_KEEP="${MIRROR_KEEP:-2}"
+MIRROR_PUBLIC_BASE="${MIRROR_PUBLIC_BASE:-https://distfiles.gentoozh.org/gigos}"
 MIRROR_URL="${MIRROR_URL:-https://iso.gentoozh.org/}"
 
 notify(){ [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_CHAT:-}" ] || return 0
@@ -28,16 +31,14 @@ on_exit(){ local rc=$?; [ "$DONE" = 1 ] && return 0; [ "$NOTIFIED" = 1 ] && retu
 trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 trap on_exit EXIT
 
-# 防并发：与自动构建共用同一把锁(构建执行期间不重传，避免互删 R2 旧盘与并发上传)
+# 防并发：与自动构建共用同一把锁(构建执行期间不重传，避免互删旧盘与并发上传)
 exec 9>"$LOCK"
 flock -n 9 || { echo "[错误] 已有构建或重传在执行($LOCK 被占),退出"; DONE=1; exit 0; }
 
-# ── R2 配置闸：缺 R2_* 直接拒绝(R2 是唯一发布目标)──────────────
-[ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ENDPOINT:-}" ] \
-  || { echo "[错误] config.env 缺 R2_*(R2 是唯一发布目标)"; notify FAILED "拒绝重传:config.env 缺 R2_*"; NOTIFIED=1; exit 1; }
-command -v rclone >/dev/null 2>&1 || { echo "[错误] 缺 rclone"; notify FAILED "拒绝重传：构建机缺 rclone"; NOTIFIED=1; exit 1; }
-export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare RCLONE_CONFIG_R2_REGION=auto
-export RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}" RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}" RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT}"
+# ── 配置闸：缺 MIRROR_SSH_TARGET 直接拒绝(镜像站是唯一发布目标)──
+[ -n "${MIRROR_SSH_TARGET}" ] \
+  || { echo "[错误] config.env 缺 MIRROR_SSH_TARGET"; notify FAILED "拒绝重传:config.env 缺 MIRROR_SSH_TARGET"; NOTIFIED=1; exit 1; }
+SSH_CMD="ssh ${MIRROR_SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15"
 
 # ── 以 BUILD_MANIFEST 为权威，三道闸 ──────────────────────────
 MANIFEST="$STAGE/BUILD_MANIFEST"
@@ -61,25 +62,25 @@ if [ "$ST_EPOCH" != 0 ]; then
     notify WARN "重传被陈旧闸拦下：$NAME stamp=$STAMP(${AGE_DAYS}天),需 --force"; NOTIFIED=1; exit 1
   fi
 fi
-echo "[OK] manifest 三道闸通过，准备重传 $NAME 到 R2"
+echo "[OK] manifest 三道闸通过，准备重传 $NAME 到镜像站"
 
-# ── 上传到 R2(零出口流量，唯一发布目标)────────────────────────
-echo "rclone copy $(du -h "$STAGE/$NAME"|cut -f1) → R2:${R2_BUCKET}/${NAME} …"
-if ! rclone copyto "$STAGE/$NAME" "R2:${R2_BUCKET}/${NAME}" --s3-no-check-bucket --s3-chunk-size 64M --retries 5; then
-  echo "[错误] R2 上传失败"; notify FAILED "重传:R2 上传失败 $NAME(稍后再试)"; NOTIFIED=1; exit 1
+# ── 上传到镜像站(唯一发布目标)────────────────────────────────
+echo "rsync $(du -h "$STAGE/$NAME"|cut -f1) → ${MIRROR_SSH_TARGET}:${MIRROR_PATH}/${NAME} …"
+if ! rsync -a --partial --inplace -e "${SSH_CMD}" "$STAGE/$NAME" "${MIRROR_SSH_TARGET}:${MIRROR_PATH}/"; then
+  echo "[错误] 镜像站上传失败"; notify FAILED "重传:镜像站上传失败 $NAME(稍后再试)"; NOTIFIED=1; exit 1
 fi
-for e in sha256 md5; do [ -f "$STAGE/$NAME.$e" ] && rclone copyto "$STAGE/$NAME.$e" "R2:${R2_BUCKET}/${NAME}.$e" --s3-no-check-bucket --retries 5 || true; done
+for e in sha256 md5; do [ -f "$STAGE/$NAME.$e" ] && rsync -a -e "${SSH_CMD}" "$STAGE/$NAME.$e" "${MIRROR_SSH_TARGET}:${MIRROR_PATH}/" || true; done
 
-# ── 端到端核对 1:R2 公开域名实际服务的就是这盘(content-length == 本地大小)──
+# ── 端到端核对 1:公开域名实际服务的就是这盘(content-length == 本地大小)──
 LOC_SIZE=$(stat -c%s "$STAGE/$NAME" 2>/dev/null)
-PUB_LEN=$(curl -fsSL -H 'Cache-Control: no-cache' -I "${R2_PUBLIC_BASE}/${NAME}" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
+PUB_LEN=$(curl -fsSL -H 'Cache-Control: no-cache' -I "${MIRROR_PUBLIC_BASE}/${NAME}" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
 if [ -z "${LOC_SIZE:-}" ] || [ "${PUB_LEN:-0}" != "${LOC_SIZE}" ]; then
-  echo "[错误] R2 对外核对失败：${R2_PUBLIC_BASE}/${NAME} content-length=${PUB_LEN:-空} != 本地 ${LOC_SIZE:-空}"
-  notify FAILED "重传后对外核对失败：${R2_PUBLIC_BASE}/${NAME} 大小不一致"; NOTIFIED=1; exit 1
+  echo "[错误] 对外核对失败：${MIRROR_PUBLIC_BASE}/${NAME} content-length=${PUB_LEN:-空} != 本地 ${LOC_SIZE:-空}"
+  notify FAILED "重传后对外核对失败：${MIRROR_PUBLIC_BASE}/${NAME} 大小不一致"; NOTIFIED=1; exit 1
 fi
-echo "[OK] R2 已发布且对外核对一致：${R2_PUBLIC_BASE}/${NAME}(${LOC_SIZE} bytes)"
+echo "[OK] 镜像站已发布且对外核对一致：${MIRROR_PUBLIC_BASE}/${NAME}(${LOC_SIZE} bytes)"
 
-# ── 端到端核对 2:mirror 落地页(Worker 即时读 R2)已列出本盘 ──
+# ── 端到端核对 2:落地页(Worker 读镜像站列表)已列出本盘 ──
 MIRROR_OK=0
 for i in 1 2 3 4 5 6; do
   if curl -fsSL -H 'Cache-Control: no-cache' "${MIRROR_URL}?_=reup-${i}" 2>/dev/null | grep -qF "${NAME}"; then MIRROR_OK=1; break; fi
@@ -88,18 +89,18 @@ done
 if [ "$MIRROR_OK" = 1 ]; then
   echo "[OK] mirror 落地页已反映：${MIRROR_URL}(${NAME})"
 else
-  echo "[警告] mirror 落地页 ~2 分钟内未反映 ${NAME}(R2 已上线;Worker 边缘缓存延迟？)"
-  notify WARN "重传:R2 已上线但 mirror 落地页未及时反映 ${NAME}(稍后手动看 ${MIRROR_URL})"
+  echo "[警告] 落地页 ~2 分钟内未反映 ${NAME}(镜像站已上线;Worker 边缘缓存延迟？)"
+  notify WARN "重传:镜像站已上线但落地页未及时反映 ${NAME}(稍后手动看 ${MIRROR_URL})"
 fi
 
-# ── 保留最近 R2_KEEP 份(gig-os-YYYYMMDD.iso),删更旧的；本盘永不删 ──
-mapfile -t _r2 < <(rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
-_i=0; for f in "${_r2[@]}"; do _i=$((_i+1)); [ "$_i" -le "$R2_KEEP" ] && continue; [ "$f" = "$NAME" ] && continue
-  echo "R2 删旧：$f(含 .sha256/.md5)"; rclone deletefile "R2:${R2_BUCKET}/${f}" || true
-  rclone deletefile "R2:${R2_BUCKET}/${f}.sha256" 2>/dev/null || true; rclone deletefile "R2:${R2_BUCKET}/${f}.md5" 2>/dev/null || true
+# ── 保留最近 MIRROR_KEEP 份(gig-os-YYYYMMDD.iso),删更旧的；本盘永不删 ──
+mapfile -t _have < <(${SSH_CMD} "${MIRROR_SSH_TARGET}" "ls -1 ${MIRROR_PATH}" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
+_i=0; for f in "${_have[@]}"; do _i=$((_i+1)); [ "$_i" -le "$MIRROR_KEEP" ] && continue; [ "$f" = "$NAME" ] && continue
+  echo "镜像站删旧：$f(含 .sha256/.md5)"
+  ${SSH_CMD} "${MIRROR_SSH_TARGET}" "rm -f ${MIRROR_PATH}/${f} ${MIRROR_PATH}/${f}.sha256 ${MIRROR_PATH}/${f}.md5" || true
 done
 
-DONE=1   # R2 上线 + 对外核对都过 = 真成功；放在收尾展示之前，免得展示用的 ls 瞬时抖动误触发 on_exit
-notify OK "重传成功并通过对外核对：$NAME(sha ${SHA:0:12}…)R2 + iso.gentoozh.org"
-echo "=== 完成,R2 现有 ==="
-rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r || true
+DONE=1   # 镜像站上线 + 对外核对都过 = 真成功；放在收尾展示之前，免得展示用的 ls 瞬时抖动误触发 on_exit
+notify OK "重传成功并通过对外核对：$NAME(sha ${SHA:0:12}…)${MIRROR_PUBLIC_BASE} + iso.gentoozh.org"
+echo "=== 完成,镜像站现有 ==="
+${SSH_CMD} "${MIRROR_SSH_TARGET}" "ls -1 ${MIRROR_PATH}" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r || true
