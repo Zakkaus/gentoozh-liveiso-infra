@@ -39,6 +39,13 @@ R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://r2.gentoozh.org}"    # 权威公开域
 MIRROR_URL="${MIRROR_URL:-https://iso.gentoozh.org/}"       # Worker 落地页（有缓存滞后）
 R2_KEEP="${R2_KEEP:-3}"                                        # R2 上保留最近几份 ISO
 
+# 镜像站发布（distfiles.gentoozh.org，最终取代 R2；未配 MIRROR_SSH_TARGET 时整段跳过）
+MIRROR_SSH_TARGET="${MIRROR_SSH_TARGET:-}"                     # 如 zakk@159.195.212.91
+MIRROR_SSH_OPTS="${MIRROR_SSH_OPTS:-}"                         # 如 -i /root/.ssh/gigos_mirror -p 60001
+MIRROR_PATH="${MIRROR_PATH:-/srv/pub/gigos}"                   # 镜像机上的落地目录
+MIRROR_KEEP="${MIRROR_KEEP:-2}"                                # 镜像站保留最近几份 ISO
+MIRROR_PUBLIC_BASE="${MIRROR_PUBLIC_BASE:-https://distfiles.gentoozh.org/gigos}"  # 末尾不带斜杠
+
 # 密钥 + 环境配置（R2_* / TG_* / 上面默认的覆盖）从 config.env 读
 CONFIG_ENV="${PERSIST}/config.env"
 [ -f "${CONFIG_ENV}" ] || { echo "缺 ${CONFIG_ENV}（从 config.env.example 复制并填）"; exit 1; }
@@ -50,7 +57,7 @@ LOG="${LOG_DIR}/build-${STAMP}.log"
 BUILD_START="$(date +%s)"
 
 # 跨阶段结果（在各函数里赋值、后续函数与通知里用；先置空，set -u 友好）
-GIT_COMMIT=""; ISO=""; ISO_NAME=""; ISO_SIZE=""; SHA=""; MIRROR_NOTE=""
+GIT_COMMIT=""; ISO=""; ISO_NAME=""; ISO_SIZE=""; SHA=""; MIRROR_NOTE=""; SITE_NOTE=""
 DONE=0; NOTIFIED=0      # 进程内哨兵：DONE=走到正常终点；NOTIFIED=已显式通知过。供退出陷阱去重。
 
 # 日志 / 通知
@@ -411,10 +418,59 @@ publish_r2() {
     done < <(rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
 }
 
+# 6b. 发布到镜像站。失败只记不拦：R2 仍是本锅的发布结果，重传由 reupload-iso.sh 承担。
+publish_site() {
+    if [ -z "${MIRROR_SSH_TARGET}" ]; then
+        log "镜像站：未配置 MIRROR_SSH_TARGET，跳过"
+        return 0
+    fi
+    local ssh_cmd="ssh ${MIRROR_SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15"
+    local f
+    log "镜像站：上传 ${ISO_NAME} 到 ${MIRROR_SSH_TARGET}:${MIRROR_PATH}…"
+    for f in "${ISO_NAME}" "${ISO_NAME}.sha256" "${ISO_NAME}.md5"; do
+        [ -f "${STAGE}/${f}" ] || continue
+        if ! rsync -a --partial --inplace -e "${ssh_cmd}" \
+                "${STAGE}/${f}" "${MIRROR_SSH_TARGET}:${MIRROR_PATH}/" 2>>"${LOG}"; then
+            SITE_NOTE="；镜像站上传失败（${f}），本锅只在 R2"
+            log "[警告] 镜像站上传失败：${f}"
+            return 0
+        fi
+    done
+
+    # 对外核对：公开域名服务的就是本锅。不一致时留在原地由下一锅覆盖，不删。
+    # 一并读状态码：404 的错误页也带 content-length，只比长度会把它当成一个尺寸。
+    local loc code pub head
+    loc=$(stat -c%s "${STAGE}/${ISO_NAME}" 2>/dev/null)
+    head=$(curl -sSL -H 'Cache-Control: no-cache' -o /dev/null \
+           -w '%{http_code} %{size_upload}' -I "${MIRROR_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null)
+    code=${head%% *}
+    pub=$(curl -sSL -H 'Cache-Control: no-cache' -I "${MIRROR_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null \
+          | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
+    if [ "${code:-}" != 200 ] || [ -z "${loc:-}" ] || [ "${pub:-0}" != "${loc}" ]; then
+        SITE_NOTE="；镜像站对外核对失败（HTTP ${code:-空}，content-length=${pub:-空} != ${loc:-空}）"
+        log "[警告] 镜像站对外核对失败：HTTP ${code:-空}，${pub:-空} != ${loc:-空}"
+        return 0
+    fi
+    log "[OK] 镜像站已发布且对外核对一致：${MIRROR_PUBLIC_BASE}/${ISO_NAME}（${loc} bytes）"
+
+    # 保留最近 MIRROR_KEEP 份，本锅永不删。
+    local keep_i=0 old
+    while read -r old; do
+        keep_i=$((keep_i+1))
+        [ "${keep_i}" -le "${MIRROR_KEEP}" ] && continue
+        [ "${old}" = "${ISO_NAME}" ] && continue
+        log "镜像站删旧：${old}"
+        ${ssh_cmd} "${MIRROR_SSH_TARGET}" \
+            "rm -f ${MIRROR_PATH}/${old} ${MIRROR_PATH}/${old}.sha256 ${MIRROR_PATH}/${old}.md5" \
+            2>>"${LOG}" || true
+    done < <(${ssh_cmd} "${MIRROR_SSH_TARGET}" "ls -1 ${MIRROR_PATH}" 2>/dev/null \
+             | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
+}
+
 # 7. 收尾
 finish() {
     log "===== [OK] 全部完成：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）====="
-    notify OK "成功：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）已上线 R2 并通过对外核对（sha ${SHA:0:12}…）iso.gentoozh.org${MIRROR_NOTE}；用时 $(fmt_dur)、$(date '+%F %T')"
+    notify OK "成功：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）已上线 R2 并通过对外核对（sha ${SHA:0:12}…）iso.gentoozh.org${MIRROR_NOTE}${SITE_NOTE}；用时 $(fmt_dur)、$(date '+%F %T')"
     DONE=1
     ls -1t "${LOG_DIR}"/build-*.log 2>/dev/null | tail -n +11 | xargs -r rm -f   # 只留最近 10 份日志
 }
@@ -440,6 +496,7 @@ main() {
     verify_iso
     stage_iso
     publish_r2
+    publish_site
     finish
 }
 

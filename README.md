@@ -37,7 +37,7 @@ chmod 600 /opt/live-iso-builder/config.env
 
 ## 流程
 
-`live-iso-build.timer` 每周一 04:00（Asia/Shanghai）触发 `build-and-deploy.sh`：
+`live-iso-build.timer` 每周二 06:00（Asia/Shanghai，即 UTC 周一 22:00）触发 `build-and-deploy.sh`：
 
 1. 拉取 `Gig-OS/Live-ISO` 的 `KDE` 分支，记下 commit。
 2. 预检：仓库可达、overlay 可达、R2 可列。缺料即停。
@@ -45,6 +45,8 @@ chmod 600 /opt/live-iso-builder/config.env
 4. `verify-iso.sh` 挂载 squashfs 抽查关键项：calamares、装机清理、grub、显卡驱动、有无混入密钥。不通过即拦下。
 5. `rclone` 上传到 R2，按 `R2_KEEP` 保留最近几版。
 6. 核对：从 R2 公开域名取回本锅文件对账 content-length，再看落地页是否已列出。
+
+7. 上传到镜像站 `distfiles.gentoozh.org/gigos/`，按 `MIRROR_KEEP` 保留最近几版，同样以对外 content-length 核对。这一步失败只在通知里写明，不拦下整锅：R2 已经是本锅的发布结果。未配 `MIRROR_SSH_TARGET` 时整段跳过。
 
 `reupload-iso.sh` 用于 R2 上传失败后手动重传，不重编，以 `BUILD_MANIFEST` 为准，校验和不符即拒绝。
 
