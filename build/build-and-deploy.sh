@@ -57,7 +57,7 @@ LOG="${LOG_DIR}/build-${STAMP}.log"
 BUILD_START="$(date +%s)"
 
 # 跨阶段结果（在各函数里赋值、后续函数与通知里用；先置空，set -u 友好）
-GIT_COMMIT=""; ISO=""; ISO_NAME=""; ISO_SIZE=""; SHA=""; MIRROR_NOTE=""; SITE_NOTE=""
+GIT_COMMIT=""; ISO=""; ISO_NAME=""; ISO_SIZE=""; SHA=""; MIRROR_NOTE=""
 DONE=0; NOTIFIED=0      # 进程内哨兵：DONE=走到正常终点；NOTIFIED=已显式通知过。供退出陷阱去重。
 
 # 日志 / 通知
@@ -365,7 +365,7 @@ EOF
     log "[OK] ISO 已暂存 + 写 manifest：sha=${SHA:0:12}…（上传失败也不会丢）"
 }
 
-# 6. 发布到 R2 + 端到端核对 + 清旧
+# 6b. 发布到 R2。公开域名已 301 到镜像站，R2 现在只作为一份异地备份。
 publish_r2() {
     log "R2：上传 ${ISO_NAME} 到 bucket ${R2_BUCKET}…"
     if ! rclone copyto "${STAGE}/${ISO_NAME}" "R2:${R2_BUCKET}/${ISO_NAME}" \
@@ -380,14 +380,13 @@ publish_r2() {
             && rclone copyto "${STAGE}/${ISO_NAME}.${e}" "R2:${R2_BUCKET}/${ISO_NAME}.${e}" --s3-no-check-bucket --retries 5 2>>"${LOG}"
     done
 
-    # 核对 1（权威）：R2 公开域名实际服务的就是本锅（content-length == 本地大小）。不一致即失败。
-    local loc pub
+    # 直接问 bucket：公开域名已 301 到镜像站，跟随跳转量到的是镜像站那一份。
+    local loc obj
     loc=$(stat -c%s "${STAGE}/${ISO_NAME}" 2>/dev/null)
-    pub=$(curl -fsSL -H 'Cache-Control: no-cache' -I "${R2_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null \
-          | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
-    [ -n "${loc:-}" ] && [ "${pub:-0}" = "${loc}" ] \
-        || fail "R2 对外核对失败：content-length=${pub:-空} != 本地 ${loc:-空}"
-    log "[OK] R2 已发布且对外核对一致：${R2_PUBLIC_BASE}/${ISO_NAME}（${loc} bytes）"
+    obj=$(rclone size --json "R2:${R2_BUCKET}/${ISO_NAME}" 2>>"${LOG}" \
+          | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')
+    [ -n "${loc:-}" ] && [ "${obj:-0}" = "${loc}" ] \
+        || fail "R2 核对失败：bucket 内 ${obj:-空} != 本地 ${loc:-空}"
 
     # 核对 2（非权威）：落地页（Worker 读 R2）是否已列出本锅。落地页只是 R2 的便利列表视图，
     # R2 本体已由核对 1 验证；Worker 边缘缓存有滞后属正常、稍后自动刷新。故只探测、不单独发 WARN
@@ -418,7 +417,7 @@ publish_r2() {
     done < <(rclone lsf "R2:${R2_BUCKET}/" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r)
 }
 
-# 6b. 发布到镜像站。失败只记不拦：R2 仍是本锅的发布结果，重传由 reupload-iso.sh 承担。
+# 6a. 发布到镜像站。r2.gentoozh.org 已 301 到这里，因此这是唯一的公开路径，失败即失败。
 publish_site() {
     if [ -z "${MIRROR_SSH_TARGET}" ]; then
         log "镜像站：未配置 MIRROR_SSH_TARGET，跳过"
@@ -431,9 +430,9 @@ publish_site() {
         [ -f "${STAGE}/${f}" ] || continue
         if ! rsync -a --partial --inplace -e "${ssh_cmd}" \
                 "${STAGE}/${f}" "${MIRROR_SSH_TARGET}:${MIRROR_PATH}/" 2>>"${LOG}"; then
-            SITE_NOTE="；镜像站上传失败（${f}），本锅只在 R2"
-            log "[警告] 镜像站上传失败：${f}"
-            return 0
+            log "[警告] 镜像站上传失败，但 ISO 已验证+暂存：${STAGE}/${ISO_NAME}"
+            notify FAILED "镜像站上传失败但 ISO 已暂存：${ISO_NAME}；恢复后执行 reupload-iso.sh（勿重编）；用时 $(fmt_dur)、$(date '+%F %T')"
+            NOTIFIED=1; cleanup_mounts; exit 1
         fi
     done
 
@@ -447,9 +446,7 @@ publish_site() {
     pub=$(curl -sSL -H 'Cache-Control: no-cache' -I "${MIRROR_PUBLIC_BASE}/${ISO_NAME}" 2>/dev/null \
           | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}' | tail -1)
     if [ "${code:-}" != 200 ] || [ -z "${loc:-}" ] || [ "${pub:-0}" != "${loc}" ]; then
-        SITE_NOTE="；镜像站对外核对失败（HTTP ${code:-空}，content-length=${pub:-空} != ${loc:-空}）"
-        log "[警告] 镜像站对外核对失败：HTTP ${code:-空}，${pub:-空} != ${loc:-空}"
-        return 0
+        fail "镜像站对外核对失败：HTTP ${code:-空}，content-length=${pub:-空} != 本地 ${loc:-空}"
     fi
     log "[OK] 镜像站已发布且对外核对一致：${MIRROR_PUBLIC_BASE}/${ISO_NAME}（${loc} bytes）"
 
@@ -470,7 +467,7 @@ publish_site() {
 # 7. 收尾
 finish() {
     log "===== [OK] 全部完成：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）====="
-    notify OK "成功：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）已上线 R2 并通过对外核对（sha ${SHA:0:12}…）iso.gentoozh.org${MIRROR_NOTE}${SITE_NOTE}；用时 $(fmt_dur)、$(date '+%F %T')"
+    notify OK "成功：${ISO_NAME}（源 ${REPO_BRANCH}@${GIT_COMMIT}）已上线 ${MIRROR_PUBLIC_BASE} 并通过对外核对，R2 备份完成（sha ${SHA:0:12}…）iso.gentoozh.org${MIRROR_NOTE}；用时 $(fmt_dur)、$(date '+%F %T')"
     DONE=1
     ls -1t "${LOG_DIR}"/build-*.log 2>/dev/null | tail -n +11 | xargs -r rm -f   # 只留最近 10 份日志
 }
@@ -495,8 +492,8 @@ main() {
     run_build
     verify_iso
     stage_iso
-    publish_r2
     publish_site
+    publish_r2
     finish
 }
 
