@@ -67,7 +67,7 @@ echo "[OK] manifest 三道闸通过，准备重传 $NAME 到镜像站"
 # ── 上传到镜像站(唯一发布目标)────────────────────────────────
 echo "rsync $(du -h "$STAGE/$NAME"|cut -f1) → ${MIRROR_SSH_TARGET}:${MIRROR_PATH}/${NAME} …"
 if ! rsync -a --partial --inplace -e "${SSH_CMD}" "$STAGE/$NAME" "${MIRROR_SSH_TARGET}:${MIRROR_PATH}/"; then
-  echo "[错误] 镜像站上传失败"; notify FAILED "重传:镜像站上传失败 $NAME(稍后再试)"; NOTIFIED=1; exit 1
+  echo "[错误] 镜像站上传失败"; notify FAILED "重传：镜像站上传失败 $NAME(稍后再试)"; NOTIFIED=1; exit 1
 fi
 for e in sha256 md5; do [ -f "$STAGE/$NAME.$e" ] && rsync -a -e "${SSH_CMD}" "$STAGE/$NAME.$e" "${MIRROR_SSH_TARGET}:${MIRROR_PATH}/" || true; done
 
@@ -90,7 +90,7 @@ if [ "$MIRROR_OK" = 1 ]; then
   echo "[OK] mirror 落地页已反映：${MIRROR_URL}(${NAME})"
 else
   echo "[警告] 落地页 ~2 分钟内未反映 ${NAME}(镜像站已上线;Worker 边缘缓存延迟？)"
-  notify WARN "重传:镜像站已上线但落地页未及时反映 ${NAME}(稍后手动看 ${MIRROR_URL})"
+  notify WARN "重传：镜像站已上线但落地页未及时反映 ${NAME}(稍后手动看 ${MIRROR_URL})"
 fi
 
 # ── 保留最近 MIRROR_KEEP 份(gig-os-YYYYMMDD.iso),删更旧的；本盘永不删 ──
@@ -102,5 +102,5 @@ done
 
 DONE=1   # 镜像站上线 + 对外核对都过 = 真成功；放在收尾展示之前，免得展示用的 ls 瞬时抖动误触发 on_exit
 notify OK "重传成功并通过对外核对：$NAME(sha ${SHA:0:12}…)${MIRROR_PUBLIC_BASE} + iso.gentoozh.org"
-echo "=== 完成,镜像站现有 ==="
+echo "=== 完成，镜像站现有 ==="
 ${SSH_CMD} "${MIRROR_SSH_TARGET}" "ls -1 ${MIRROR_PATH}" 2>/dev/null | grep -E '^gig-os-[0-9]{8}\.iso$' | sort -r || true
