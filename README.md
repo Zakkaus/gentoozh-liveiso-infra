@@ -20,7 +20,7 @@ Gentoo 中文社区 Live ISO 的自动构建与发布脚本。产物是 KDE Plas
 
 步骤：
 
-1. 确认没有构建在执行：`systemctl is-active live-iso-build.service`。构建期间覆盖脚本会让执行中的进程读到半截代码，整锅作废。
+1. 确认没有构建在执行：`systemctl is-active live-iso-build.service`。构建期间覆盖脚本会让执行中的进程读到半截代码，整轮作废。
 2. 同步脚本，`chmod +x /opt/live-iso-builder/*.sh`。
 3. 改过 unit 要 `systemctl daemon-reload`。timer 用 `systemctl enable --now live-iso-build.timer`；`live-iso-notify-fail.service` 由 `OnFailure=` 拉起，不必 enable。
 4. 填 `config.env`，并让 root 有一把能写镜像机 `/srv/pub/gigos` 的私钥。目标不可写时预检直接停，不会先编几小时。
@@ -41,10 +41,10 @@ chmod 600 /opt/live-iso-builder/config.env
 
 1. 拉取 `Gig-OS/Live-ISO` 的 `KDE` 分支，记下 commit。
 2. 预检：仓库可达、overlay 可达、镜像站落地目录可写。缺料即停。
-3. 构建。**默认落磁盘**；`USE_TMPFS=1` 才挂 tmpfs 在内存里编。这是共享机，其他人的编译同样需要内存。binpkg 与 distfiles 缓存落 SSD 跨锅复用。
+3. 构建。**默认落磁盘**；`USE_TMPFS=1` 才挂 tmpfs 在内存里编。这是共享机，其他人的编译同样需要内存。binpkg 与 distfiles 缓存落 SSD 跨轮复用。
 4. `verify-iso.sh` 挂载 squashfs 抽查关键项：calamares、装机清理、grub、显卡驱动、有无混入密钥。不通过即拦下。
 5. 上传到镜像站 `distfiles.gentoozh.org/gigos/`，按 `MIRROR_KEEP` 保留最近几版，以对外状态码与 content-length 核对。`r2.gentoozh.org` 已 301 到这里，这是唯一的公开路径，失败即失败。未配 `MIRROR_SSH_TARGET` 时整段跳过。
-6. 看落地页是否已列出本锅。落地页是 Worker 读镜像站目录清单的视图，有缓存滞后，不作权威。
+6. 看落地页是否已列出本轮产物。落地页是 Worker 读镜像站目录清单的视图，有缓存滞后，不作权威。
 
 `reupload-iso.sh` 用于上传失败后手动重传，不重编，以 `BUILD_MANIFEST` 为准，校验和不符即拒绝。
 
