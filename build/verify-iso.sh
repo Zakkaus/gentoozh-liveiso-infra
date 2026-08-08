@@ -118,6 +118,7 @@ echo "--- 4. 开机选语言服务 ---"
 [ -f "${R}/usr/local/bin/gigos-live-lang.sh" ] && [ -x "${R}/usr/local/bin/gigos-live-lang.sh" ] && ok "gigos-live-lang.sh 在且可执行" || no "语言脚本缺/不可执行"
 [ -f "${R}/etc/systemd/system/gigos-live-lang.service" ] && ok "语言服务 unit 在" || no "语言服务 unit 缺"
 ls "${R}"/etc/systemd/system/*.wants/gigos-live-lang.service >/dev/null 2>&1 && ok "语言服务已 enable" || no "语言服务没 enable(开机不执行)"
+[ -f "${R}/usr/local/bin/gigos-apply-locale.sh" ] && [ -x "${R}/usr/local/bin/gigos-apply-locale.sh" ] && ok "gigos-apply-locale.sh 在且可执行" || no "装机语言脚本缺/不可执行"
 
 echo
 echo "--- 5. 显卡双驱动 + nouveau 黑名单解除 ---"
